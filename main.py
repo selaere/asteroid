@@ -80,30 +80,27 @@ async def on_raw_reaction_remove(ev:discord.RawReactionActionEvent):
 
 async def do():
     bot.db=await aiosqlite.connect("bees.db")
-    await bot.db.executescript("""
-    BEGIN;
-    CREATE TABLE IF NOT EXISTS guilds(
-        id INTEGER PRIMARY KEY,
-        minimum INTEGER NOT NULL DEFAULT 3,
-        channel INTEGER NOT NULL UNIQUE
-    );
-    CREATE TABLE IF NOT EXISTS messages(
-        original  INTEGER PRIMARY KEY,
-        starboard INTEGER NOT NULL UNIQUE,
-        guild INTEGER NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS stars(
-        starrer INTEGER NOT NULL,
-        starred INTEGER NOT NULL,
-        guild INTEGER NOT NULL
-    );
-    CREATE INDEX IF NOT EXISTS idx_starred ON stars(starred); 
-    COMMIT;""")
-    with open("token") as f: tok=f.read().strip()
-    try:
+    async with bot, bot.db:
+        await bot.db.executescript("""
+        BEGIN;
+        CREATE TABLE IF NOT EXISTS guilds(
+            id INTEGER PRIMARY KEY,
+            minimum INTEGER NOT NULL DEFAULT 3,
+            channel INTEGER NOT NULL UNIQUE
+        );
+        CREATE TABLE IF NOT EXISTS messages(
+            original  INTEGER PRIMARY KEY,
+            starboard INTEGER NOT NULL UNIQUE,
+            guild INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS stars(
+            starrer INTEGER NOT NULL,
+            starred INTEGER NOT NULL,
+            guild INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_starred ON stars(starred); 
+        COMMIT;""")
+        with open("token") as f: tok=f.read().strip()
         await bot.start(tok)
-    finally:
-        print("bye")
-        await bot.db.close()
 
 asyncio.run(do())
