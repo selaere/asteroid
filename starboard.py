@@ -12,7 +12,10 @@ class Starboard(commands.Cog):
 
     def __init__(self, bot):
         self.bot = bot
-        self.db = bot.db
+        self.db: aiosqlite.Connection = bot.db
+    
+    async def db_fetchone(self, sql, parameters):
+        return await (await self.db.execute(sql, parameters)).fetchone()
 
     @app_commands.command(description="change configuration like starboard channel or min stars")
     @app_commands.rename(channel="starboard-channel",minimum="minimum-star-count")
@@ -42,8 +45,8 @@ class Starboard(commands.Cog):
         if ev.emoji.name != "⭐": return
         await self.db.execute("INSERT INTO stars(starrer,starred,guild) VALUES(?,?,?)",
                             (ev.user_id, ev.message_id, ev.guild_id))
-        minimum,channel = await (await self.db.execute("SELECT minimum,channel FROM guilds WHERE id=?", (ev.guild_id,))).fetchone()
-        (count,) = await (await self.db.execute("SELECT count(starrer) FROM stars WHERE starred=?", (ev.message_id,))).fetchone()
+        minimum,channel = await self.db_fetchone("SELECT minimum,channel FROM guilds WHERE id=?", (ev.guild_id,))
+        (count,) = await self.db_fetchone("SELECT count(starrer) FROM stars WHERE starred=?", (ev.message_id,))
         if count==minimum:
             original = await self.bot.get_channel(ev.channel_id).fetch_message(ev.message_id)
             starboard = await self.bot.get_channel(channel).send(
@@ -52,7 +55,7 @@ class Starboard(commands.Cog):
                 content=original.jump_url
             )
             await self.db.execute("INSERT OR REPLACE INTO messages(original,starboard,guild) VALUES(?,?,?)",
-                                (original.id, starboard.id, ev.guild_id))
+                                  (original.id, starboard.id, ev.guild_id))
         await self.db.commit()
 
     @commands.Cog.listener()
@@ -60,11 +63,11 @@ class Starboard(commands.Cog):
         if ev.emoji.name != "⭐": return
         if (await self.db.execute("DELETE FROM stars WHERE starrer=? AND starred=?",
                                 (ev.user_id, ev.message_id))).rowcount == 0: return
-        (minimum,channel) = await (await self.db.execute("SELECT minimum,channel FROM guilds WHERE id=?", (ev.guild_id,))).fetchone()
-        (count,) = await (await self.db.execute("SELECT count(starrer) FROM stars WHERE starred=?", (ev.message_id,))).fetchone()
+        (minimum,channel) = await self.db_fetchone("SELECT minimum,channel FROM guilds WHERE id=?", (ev.guild_id,))
+        (count,) = await self.db_fetchone("SELECT count(starrer) FROM stars WHERE starred=?", (ev.message_id,))
         print(count,minimum)
         if count<minimum:
-            match await (await self.db.execute("DELETE FROM messages WHERE original=? RETURNING starboard", (ev.message_id,))).fetchone():
+            match await self.db_fetchone("DELETE FROM messages WHERE original=? RETURNING starboard", (ev.message_id,)):
                 case (starboard,):
                     await self.bot.get_channel(channel).get_partial_message(starboard).delete()
             await self.db.commit()
