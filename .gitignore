@@ -1,0 +1,5 @@
+venv
+token
+.vscode
+bees.db
+bees.db-journal
