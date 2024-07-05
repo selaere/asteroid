@@ -3,3 +3,4 @@ token
 .vscode
 bees.db
 bees.db-journal
+__pycache__
