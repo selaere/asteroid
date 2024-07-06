@@ -5,6 +5,13 @@ import aiosqlite
 import asyncio
 import logging
 
+def calc_color(count:int) -> discord.Colour:
+    return discord.Colour.from_rgb(255,255,max(0,min(255,1024//(count+2)-20)))
+
+def build_message(count:int, msg:discord.Message) -> dict:
+    return {"content": msg.jump_url,
+            "embed": discord.Embed(colour=calc_color(count), description=msg.content)
+                     .set_author(name=msg.author.display_name, icon_url=msg.author.display_avatar.url) }
 
 def ephemeral(c,*args,**kwargs): return c.response.send_message(*args,ephemeral=True,**kwargs)
 
@@ -13,91 +20,98 @@ class Starboard(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.db: aiosqlite.Connection = bot.db
+
+    def partial_msg(self,channel,id): return self.bot.get_channel(channel).get_partial_message(id)
     
-    async def db_fetchone(self, sql, parameters, default):  # avoids annoying double await
+    async def db_fetchone(self, sql, parameters, default=None):  # avoids annoying double await
         a = await (await self.db.execute(sql, parameters)).fetchone()
         return a if a is not None else default # () is falsy :(
 
-    @app_commands.command(description="change configuration like starboard channel or min stars")
-    @app_commands.rename(channel="starboard-channel",minimum="minimum-star-count")
+    @app_commands.command(description="change configuration like msg_sb channel or min stars")
+    @app_commands.rename(sb="starboard-channel",minimum="minimum-star-count")
     @app_commands.default_permissions(manage_channels=True)
-    async def starconfig(self, c:discord.Interaction, channel:discord.TextChannel|None=None, minimum:int|None=None):
-        if channel is None and minimum is None:
+    async def starconfig(self, c:discord.Interaction, sb:discord.TextChannel|None=None, minimum:int|None=None):
+        if sb is None and minimum is None:
             await self.db.execute("DELETE FROM guilds WHERE id=?", (c.guild_id,))
             await ephemeral(c,"unconfigued")
         else:
-            if channel is not None:
-                if channel.guild != c.guild: return await ephemeral(c,"eat bricks")
-                await self.db.execute("INSERT OR REPLACE INTO guilds(id,channel) VALUES(?,?)", (c.guild_id, channel.id))
+            if sb is not None:
+                if sb.guild != c.guild: return await ephemeral(c,"eat bricks")
+                await self.db.execute("INSERT OR REPLACE INTO guilds(guild,sb) VALUES(?,?)", (c.guild_id, sb.id))
                 await ephemeral(c,"ok")
 
             if minimum is not None:
                 if minimum < 1: return await ephemeral(c,"eat bricks")
-                cur = await self.db.execute("UPDATE guilds SET minimum=? WHERE id=?", (minimum, c.guild_id))
+                cur = await self.db.execute("UPDATE guilds SET minimum=? WHERE guild=?", (minimum, c.guild_id))
                 if cur.rowcount==0:
                     self.db.rollback()
-                    return ephemeral(c, "no channel set")
+                    return ephemeral(c, "no starboard channel set")
 
         await ephemeral(c, "ok")
         await self.db.commit()
 
+
     @commands.Cog.listener()
     async def on_raw_reaction_add(self, ev:discord.RawReactionActionEvent):
         if ev.emoji.name != "⭐": return
-        await self.db.execute("INSERT INTO stars(starrer,starred,guild) VALUES(?,?,?)",
-                            (ev.user_id, ev.message_id, ev.guild_id))
+        await self.db.execute("INSERT INTO stars(starrer,msg,guild) VALUES(?,?,?)", (ev.user_id,ev.message_id,ev.guild_id))
         try:
-            minimum,channel = await self.db_fetchone("SELECT minimum,channel FROM guilds WHERE id=?", (ev.guild_id,))
+            minimum,sb_id = await self.db_fetchone("SELECT minimum,sb FROM guilds WHERE guild=?", (ev.guild_id,))
         except TypeError:
             return await self.db.commit()
-        (count,) = await self.db_fetchone("SELECT count(starrer) FROM stars WHERE starred=?", (ev.message_id,))
+        (count,) = await self.db_fetchone("SELECT count(starrer) FROM stars WHERE msg=?", (ev.message_id,))
+        if count<minimum: return await self.db.commit()
+        new = build_message(count, await self.partial_msg(ev.channel_id,ev.message_id).fetch())
         if count==minimum:
-            original  = await self.bot.get_channel(ev.channel_id).fetch_message(ev.message_id)
-            starboard = await self.bot.get_channel(channel).send(
-                embed=discord.Embed(colour=discord.Color.yellow(), description=original.content)
-                    .set_author(name=original.author.display_name, icon_url=original.author.display_avatar.url),
-                content=original.jump_url
-            )
-            await self.db.execute("INSERT OR REPLACE INTO messages(original,starboard,guild) VALUES(?,?,?)",
-                                  (original.id, starboard.id, ev.guild_id))
+            msg_sb = await self.bot.get_channel(sb_id).send(**new)
+            await self.db.execute("INSERT OR REPLACE INTO messages(msg,msg_sb,guild,author) VALUES(?,?,?,?)",
+                                  (ev.message_id, msg_sb.id, ev.guild_id, ev.message_author_id))
+        else:
+            (msg_sb_id,) = await self.db_fetchone("SELECT msg_sb FROM messages WHERE msg=?", (ev.message_id,))
+            await self.partial_msg(sb_id,msg_sb_id).edit(**new)
         await self.db.commit()
 
     @commands.Cog.listener()
     async def on_raw_reaction_remove(self, ev:discord.RawReactionActionEvent):
         if ev.emoji.name != "⭐": return
-        if (await self.db.execute("DELETE FROM stars WHERE starrer=? AND starred=?",
-                                  (ev.user_id, ev.message_id))).rowcount == 0: return
+        dlt = await self.db.execute("DELETE FROM stars WHERE starrer=? AND msg=?", (ev.user_id, ev.message_id))
+        if dlt.rowcount == 0: return
         try:
-            minimum,channel = await self.db_fetchone("SELECT minimum,channel FROM guilds WHERE id=?", (ev.guild_id,))
+            minimum,sb_id = await self.db_fetchone("SELECT minimum,sb FROM guilds WHERE guild=?", (ev.guild_id,))
         except TypeError:
             return await self.db.commit()
-        (count,) = await self.db_fetchone("SELECT count(starrer) FROM stars WHERE starred=?", (ev.message_id,))
-        print(count,minimum)
+        (count,) = await self.db_fetchone("SELECT count(starrer) FROM stars WHERE msg=?", (ev.message_id,))
         if count<minimum:
-            match await self.db_fetchone("DELETE FROM messages WHERE original=? RETURNING starboard", (ev.message_id,)):
-                case (starboard,):
-                    await self.bot.get_channel(channel).get_partial_message(starboard).delete()
-            await self.db.commit()
+            match await self.db_fetchone("DELETE FROM messages WHERE msg=? RETURNING msg_sb", (ev.message_id,)):
+                case msg_sb_id,:
+                    await self.partial_msg(sb_id,msg_sb_id).delete()
+        else:
+            match await self.db_fetchone("SELECT msg_sb FROM messages WHERE msg=?", (ev.message_id,)):
+                case msg_sb_id,:
+                    new = build_message(count, await self.partial_msg(ev.channel_id,ev.message_id).fetch())
+                    await self.partial_msg(sb_id,msg_sb_id).edit(**new)
+        await self.db.commit()
 
 async def setup(bot):
-    await bot.db.executescript("""
+    await bot.db.executescript(f"""
         BEGIN;
         CREATE TABLE IF NOT EXISTS guilds(
-            id INTEGER PRIMARY KEY,
+            guild   INTEGER PRIMARY KEY,
             minimum INTEGER NOT NULL DEFAULT 3,
-            channel INTEGER NOT NULL UNIQUE
+            sb      INTEGER NOT NULL UNIQUE  -- starboard channel
         );
         CREATE TABLE IF NOT EXISTS messages(
-            original  INTEGER PRIMARY KEY,
-            starboard INTEGER NOT NULL UNIQUE,
-            guild INTEGER NOT NULL
+            msg     INTEGER PRIMARY KEY,     -- original message
+            msg_sb  INTEGER NOT NULL UNIQUE, -- message in starboard
+            guild   INTEGER NOT NULL,
+            author  INTEGER NOT NULL
         );
         CREATE TABLE IF NOT EXISTS stars(
             starrer INTEGER NOT NULL,
-            starred INTEGER NOT NULL,
-            guild INTEGER NOT NULL
+            msg     INTEGER NOT NULL,
+            guild   INTEGER NOT NULL
         );
-        CREATE INDEX IF NOT EXISTS idx_starred ON stars(starred); 
+        CREATE INDEX IF NOT EXISTS idx_starred ON stars(msg); 
         COMMIT;""")
     await bot.add_cog(Starboard(bot))
 
