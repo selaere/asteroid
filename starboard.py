@@ -14,8 +14,9 @@ class Starboard(commands.Cog):
         self.bot = bot
         self.db: aiosqlite.Connection = bot.db
     
-    async def db_fetchone(self, sql, parameters):
-        return await (await self.db.execute(sql, parameters)).fetchone()
+    async def db_fetchone(self, sql, parameters, default):  # avoids annoying double await
+        a = await (await self.db.execute(sql, parameters)).fetchone()
+        return a if a is not None else default # () is falsy :(
 
     @app_commands.command(description="change configuration like starboard channel or min stars")
     @app_commands.rename(channel="starboard-channel",minimum="minimum-star-count")
@@ -45,10 +46,13 @@ class Starboard(commands.Cog):
         if ev.emoji.name != "⭐": return
         await self.db.execute("INSERT INTO stars(starrer,starred,guild) VALUES(?,?,?)",
                             (ev.user_id, ev.message_id, ev.guild_id))
-        minimum,channel = await self.db_fetchone("SELECT minimum,channel FROM guilds WHERE id=?", (ev.guild_id,))
+        try:
+            minimum,channel = await self.db_fetchone("SELECT minimum,channel FROM guilds WHERE id=?", (ev.guild_id,))
+        except TypeError:
+            return await self.db.commit()
         (count,) = await self.db_fetchone("SELECT count(starrer) FROM stars WHERE starred=?", (ev.message_id,))
         if count==minimum:
-            original = await self.bot.get_channel(ev.channel_id).fetch_message(ev.message_id)
+            original  = await self.bot.get_channel(ev.channel_id).fetch_message(ev.message_id)
             starboard = await self.bot.get_channel(channel).send(
                 embed=discord.Embed(colour=discord.Color.yellow(), description=original.content)
                     .set_author(name=original.author.display_name, icon_url=original.author.display_avatar.url),
@@ -62,8 +66,11 @@ class Starboard(commands.Cog):
     async def on_raw_reaction_remove(self, ev:discord.RawReactionActionEvent):
         if ev.emoji.name != "⭐": return
         if (await self.db.execute("DELETE FROM stars WHERE starrer=? AND starred=?",
-                                (ev.user_id, ev.message_id))).rowcount == 0: return
-        (minimum,channel) = await self.db_fetchone("SELECT minimum,channel FROM guilds WHERE id=?", (ev.guild_id,))
+                                  (ev.user_id, ev.message_id))).rowcount == 0: return
+        try:
+            minimum,channel = await self.db_fetchone("SELECT minimum,channel FROM guilds WHERE id=?", (ev.guild_id,))
+        except TypeError:
+            return await self.db.commit()
         (count,) = await self.db_fetchone("SELECT count(starrer) FROM stars WHERE starred=?", (ev.message_id,))
         print(count,minimum)
         if count<minimum:
