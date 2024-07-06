@@ -41,6 +41,13 @@ class Starboard(commands.Cog):
                 msg += f"The starboard is toggled off right now."
         await ctx.send(msg)
 
+    @commands.hybrid_command(description="see a random starred message")
+    async def random(self, ctx:commands.Context):
+        msg_id,msg_ch_id = await self.db_fetchone(
+            "SELECT msg,msg_ch FROM messages WHERE guild=? ORDER BY random() LIMIT 1", (ctx.guild.id,))
+        count, = await self.db_fetchone("SELECT count(starrer) FROM stars WHERE msg=?", (msg_id,))
+        await ctx.send(**build_message(count, await self.partial_msg(msg_ch_id,msg_id).fetch()))
+
     @app_commands.command(description="change configuration like msg_sb channel or min stars")
     @app_commands.rename(sb="starboard-channel",minimum="minimum-star-count")
     @app_commands.default_permissions(manage_channels=True)
@@ -78,10 +85,10 @@ class Starboard(commands.Cog):
         new = build_message(count, await self.partial_msg(ev.channel_id,ev.message_id).fetch())
         if count==minimum:
             msg_sb = await self.bot.get_channel(sb_id).send(**new)
-            await self.db.execute("INSERT OR REPLACE INTO messages(msg,msg_sb,guild,author) VALUES(?,?,?,?)",
-                                  (ev.message_id, msg_sb.id, ev.guild_id, ev.message_author_id))
+            await self.db.execute("INSERT OR REPLACE INTO messages(msg,msg_sb,msg_ch,guild,author) VALUES(?,?,?,?,?)",
+                                  (ev.message_id, msg_sb.id, ev.channel_id, ev.guild_id, ev.message_author_id))
         else:
-            (msg_sb_id,) = await self.db_fetchone("SELECT msg_sb FROM messages WHERE msg=?", (ev.message_id,))
+            msg_sb_id, = await self.db_fetchone("SELECT msg_sb FROM messages WHERE msg=?", (ev.message_id,))
             await self.partial_msg(sb_id,msg_sb_id).edit(**new)
         await self.db.commit()
 
@@ -116,6 +123,7 @@ async def setup(bot):
         );
         CREATE TABLE IF NOT EXISTS messages( -- ONLY awarded messages
             msg     INTEGER PRIMARY KEY,     -- original message
+            msg_ch  INTEGER NOT NULL,        -- original message's channel
             msg_sb  INTEGER NOT NULL UNIQUE, -- message in starboard
             guild   INTEGER NOT NULL,
             author  INTEGER NOT NULL
