@@ -27,12 +27,26 @@ class Starboard(commands.Cog):
         a = await (await self.db.execute(sql, parameters)).fetchone()
         return a if a is not None else default # () is falsy :(
 
+    @commands.hybrid_command(description="see some server-specific statistics for starboard")
+    async def info(self, ctx:commands.Context):
+        total_stars,starred_messages = await self.db_fetchone(
+            "SELECT count(*),count(DISTINCT msg) FROM stars WHERE guild=?", (ctx.guild.id,))
+        msg = f"Hi, i am asteroid ^_^\nI have seen {total_stars} stars and {starred_messages} starred messages.\n"
+        match await self.db_fetchone("SELECT minimum,sb FROM guilds WHERE guild=?", (ctx.guild.id,)):
+            case minimum,sb_id:
+                awarded_messages, = await self.db_fetchone("SELECT count(*) FROM messages WHERE guild=?", (ctx.guild.id,))
+                msg += (f"When messages reach {minimum} ⭐, they will be resent to <#{sb_id}>. "
+                        f"Right now there are {awarded_messages} messages there.")
+            case None:
+                msg += f"The starboard is toggled off right now."
+        await ctx.send(msg)
+
     @app_commands.command(description="change configuration like msg_sb channel or min stars")
     @app_commands.rename(sb="starboard-channel",minimum="minimum-star-count")
     @app_commands.default_permissions(manage_channels=True)
     async def starconfig(self, c:discord.Interaction, sb:discord.TextChannel|None=None, minimum:int|None=None):
         if sb is None and minimum is None:
-            await self.db.execute("DELETE FROM guilds WHERE id=?", (c.guild_id,))
+            await self.db.execute("DELETE FROM guilds WHERE guild=?", (c.guild_id,))
             await ephemeral(c,"unconfigued")
         else:
             if sb is not None:
@@ -59,7 +73,7 @@ class Starboard(commands.Cog):
             minimum,sb_id = await self.db_fetchone("SELECT minimum,sb FROM guilds WHERE guild=?", (ev.guild_id,))
         except TypeError:
             return await self.db.commit()
-        (count,) = await self.db_fetchone("SELECT count(starrer) FROM stars WHERE msg=?", (ev.message_id,))
+        count, = await self.db_fetchone("SELECT count(starrer) FROM stars WHERE msg=?", (ev.message_id,))
         if count<minimum: return await self.db.commit()
         new = build_message(count, await self.partial_msg(ev.channel_id,ev.message_id).fetch())
         if count==minimum:
@@ -80,7 +94,7 @@ class Starboard(commands.Cog):
             minimum,sb_id = await self.db_fetchone("SELECT minimum,sb FROM guilds WHERE guild=?", (ev.guild_id,))
         except TypeError:
             return await self.db.commit()
-        (count,) = await self.db_fetchone("SELECT count(starrer) FROM stars WHERE msg=?", (ev.message_id,))
+        count, = await self.db_fetchone("SELECT count(starrer) FROM stars WHERE msg=?", (ev.message_id,))
         if count<minimum:
             match await self.db_fetchone("DELETE FROM messages WHERE msg=? RETURNING msg_sb", (ev.message_id,)):
                 case msg_sb_id,:
@@ -100,7 +114,7 @@ async def setup(bot):
             minimum INTEGER NOT NULL DEFAULT 3,
             sb      INTEGER NOT NULL UNIQUE  -- starboard channel
         );
-        CREATE TABLE IF NOT EXISTS messages(
+        CREATE TABLE IF NOT EXISTS messages( -- ONLY awarded messages
             msg     INTEGER PRIMARY KEY,     -- original message
             msg_sb  INTEGER NOT NULL UNIQUE, -- message in starboard
             guild   INTEGER NOT NULL,
