@@ -60,7 +60,6 @@ class Starboard(commands.Cog):
                 if sb.guild != c.guild: return await ephemeral(c,"eat bricks")
                 await self.db.execute("INSERT OR REPLACE INTO guilds(guild,sb) VALUES(?,?)", (c.guild_id, sb.id))
                 await ephemeral(c,"ok")
-
             if minimum is not None:
                 if minimum < 1: return await ephemeral(c,"eat bricks")
                 cur = await self.db.execute("UPDATE guilds SET minimum=? WHERE guild=?", (minimum, c.guild_id))
@@ -83,13 +82,13 @@ class Starboard(commands.Cog):
         count, = await self.db_fetchone("SELECT count(starrer) FROM stars WHERE msg=?", (ev.message_id,))
         if count<minimum: return await self.db.commit()
         new = build_message(count, await self.partial_msg(ev.channel_id,ev.message_id).fetch())
-        if count==minimum:
-            msg_sb = await self.bot.get_channel(sb_id).send(**new)
-            await self.db.execute("INSERT OR REPLACE INTO messages(msg,msg_sb,msg_ch,guild,author) VALUES(?,?,?,?,?)",
-                                  (ev.message_id, msg_sb.id, ev.channel_id, ev.guild_id, ev.message_author_id))
-        else:
-            msg_sb_id, = await self.db_fetchone("SELECT msg_sb FROM messages WHERE msg=?", (ev.message_id,))
-            await self.partial_msg(sb_id,msg_sb_id).edit(**new)
+        match await self.db_fetchone("SELECT msg_sb FROM messages WHERE msg=?", (ev.message_id,)):
+            case msg_sb_id,:
+                await self.partial_msg(sb_id,msg_sb_id).edit(**new)
+            case None:
+                msg_sb = await self.bot.get_channel(sb_id).send(**new)
+                await self.db.execute("INSERT INTO messages(msg,msg_sb,msg_ch,guild,author) VALUES(?,?,?,?,?)",
+                                      (ev.message_id, msg_sb.id, ev.channel_id, ev.guild_id, ev.message_author_id))
         await self.db.commit()
 
     @commands.Cog.listener()
