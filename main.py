@@ -39,8 +39,8 @@ async def sql(ctx:commands.Context, *, query:str):
 
 @bot.command()
 @commands.is_owner()
-async def sync(ctx:commands.Context, *, query:str):
-    await bot.tree.sync(guild=bot.guilds[0])
+async def sync(ctx:commands.Context):
+    await bot.tree.sync()
 
 async def do():
     bot.db=aiosqlite.connect("bees.db")
