@@ -125,15 +125,13 @@ class Starboard(commands.Cog):
     
     async def star_menu(self, c:discord.Interaction, msg:discord.Message):
         minimum,sb_id,msg_id,msg_ch_id,_,msg = await self.find_msg(msg.id,msg.channel.id,c.guild_id,msg=msg)
-        if not await self.add_star(msg_id,msg_ch_id,c.guild_id,c.user.id,minimum,sb_id,medium=2,msg=msg):
-            await ephemeral(c, "you already starred that, bozo!")
-        else: await ephemeral(c, "ok")
+        success = await self.add_star(msg_id,msg_ch_id,c.guild_id,c.user.id,minimum,sb_id,medium=2,msg=msg)
+        await ephemeral(c, "ok" if success else "you already starred that, bozo!")
 
     async def unstar_menu(self, c:discord.Interaction, msg:discord.Message):
         minimum,sb_id,msg_id,msg_ch_id,_,msg = await self.find_msg(msg.id,msg.channel.id,c.guild_id,msg=msg)
-        if not await self.remove_star(msg_id,msg_ch_id,c.guild_id,c.user.id,minimum,sb_id,medium=2,msg=msg):
-            await ephemeral(c, "eat bricks")
-        else: await ephemeral(c, "ok")
+        success = await self.remove_star(msg_id,msg_ch_id,c.guild_id,c.user.id,minimum,sb_id,medium=2,msg=msg)
+        await ephemeral(c, "ok" if success else "eat bricks")
 
     async def find_msg(self, msg_id:int, msg_ch_id:int, guild_id:int, msg:discord.Message|None=None
     ) -> (int,int,int,int,int,discord.Message|None):
@@ -147,7 +145,7 @@ class Starboard(commands.Cog):
             except TypeError: pass  # message in starboard but not managed by this bot. i'll allow it
         return minimum,sb_id,msg_id,msg_ch_id,0,msg
     
-    async def add_star(self, msg_id:int, msg_ch_id:int, guild_id:int, user_id:int, minimum:int, sb_id:int, medium:int,
+    async def add_star(self, minimum:int, sb_id:int, msg_id:int, msg_ch_id:int, guild_id:int, user_id:int, medium:int,
                        msg:discord.Message|None=None) -> bool:  # return True if the star was there already
         if (await self.db.execute("INSERT OR IGNORE INTO stars(starrer,msg,guild,medium) VALUES(?,?,?,?)",
                                   (user_id,msg_id,guild_id,medium))).rowcount == 0:
