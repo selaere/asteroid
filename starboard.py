@@ -112,38 +112,48 @@ class Starboard(commands.Cog):
 
     @commands.Cog.listener()
     async def on_raw_reaction_add(self, ev:discord.RawReactionActionEvent):
-        if ev.emoji.name!="⭐": return
-        minimum,sb_id,msg_id,msg_ch_id,medium,_ = await self.find_msg(ev.message_id,ev.channel_id,ev.guild_id)
-        if not await self.add_star(msg_id,msg_ch_id,ev.guild_id,ev.user_id,minimum,sb_id,medium):
+        if ev.emoji.name != "⭐": return
+        r  = await self.get_guild_info(ev.guild_id)
+        r |= await self.find_msg(msg_id=ev.message_id, msg_ch_id=ev.channel_id, **r)
+        if not await self.add_star(user_id=ev.user_id, **r):
             await self.partial_msg(ev.channel_id,ev.message_id).remove_reaction("⭐", discord.Object(ev.user_id))
 
     @commands.Cog.listener()
     async def on_raw_reaction_remove(self, ev:discord.RawReactionActionEvent):
-        if ev.emoji.name!="⭐": return
-        minimum,sb_id,msg_id,msg_ch_id,medium,_ = await self.find_msg(ev.message_id,ev.channel_id,ev.guild_id)
-        await self.remove_star(msg_id,msg_ch_id,ev.guild_id,ev.user_id,minimum,sb_id,medium)
+        if ev.emoji.name != "⭐": return
+        r  = await self.get_guild_info(ev.guild_id)
+        r |= await self.find_msg(msg_id=ev.message_id, msg_ch_id=ev.channel_id, **r)
+        await self.remove_star(user_id=ev.user_id, **r)
     
     async def star_menu(self, c:discord.Interaction, msg:discord.Message):
-        minimum,sb_id,msg_id,msg_ch_id,_,msg = await self.find_msg(msg.id,msg.channel.id,c.guild_id,msg=msg)
-        success = await self.add_star(msg_id,msg_ch_id,c.guild_id,c.user.id,minimum,sb_id,medium=2,msg=msg)
+        r  = await self.get_guild_info(c.guild_id)
+        r |= await self.find_msg(msg_id=msg.id, msg_ch_id=msg.channel.id, msg=msg, **r) | {"medium":2}
+        success = await self.add_star(user_id=c.user.id, **r)
         await ephemeral(c, "ok" if success else "you already starred that, bozo!")
 
     async def unstar_menu(self, c:discord.Interaction, msg:discord.Message):
-        minimum,sb_id,msg_id,msg_ch_id,_,msg = await self.find_msg(msg.id,msg.channel.id,c.guild_id,msg=msg)
-        success = await self.remove_star(msg_id,msg_ch_id,c.guild_id,c.user.id,minimum,sb_id,medium=2,msg=msg)
-        await ephemeral(c, "ok" if success else "eat bricks")
+        r  = await self.get_guild_info(c.guild_id)
+        r |= await self.find_msg(msg_id=msg.id, msg_ch_id=msg.channel.id, msg=msg, **r) | {"medium":2}
+        success = await self.remove_star(user_id=c.user.id, **r)
+        await ephemeral(c, "ok" if success else "couldn't remove star")
 
-    async def find_msg(self, msg_id:int, msg_ch_id:int, guild_id:int, msg:discord.Message|None=None
-    ) -> (int,int,int,int,int,discord.Message|None):
+    async def get_guild_info(self, guild_id:int) -> dict:
         try:
             minimum,sb_id = await self.db_fetchone("SELECT minimum,sb FROM guilds WHERE guild=?", (guild_id,))
-        except TypeError as e: raise NotConfigured() from e
+        except TypeError as e:
+            raise NotConfigured() from e
+        return {"minimum":minimum, "sb_id":sb_id, "guild_id":guild_id}
+
+    async def find_msg(self, minimum:int, sb_id:int, msg_id:int, msg_ch_id:int, guild_id:int,
+                       msg:discord.Message|None=None, **_) -> dict:
+        medium = 1
         if msg_ch_id == sb_id:
             try:
                 msg_id,msg_ch_id = await self.db_fetchone("SELECT msg,msg_ch FROM awarded WHERE msg_sb=?", (msg_id,))
-                return minimum,sb_id,msg_id,msg_ch_id,1,None
+                medium = 1
+                msg = None
             except TypeError: pass  # message in starboard but not managed by this bot. i'll allow it
-        return minimum,sb_id,msg_id,msg_ch_id,0,msg
+        return {"msg_id":msg_id, "msg_ch_id":msg_ch_id, "medium":medium, "msg":msg}
     
     async def add_star(self, minimum:int, sb_id:int, msg_id:int, msg_ch_id:int, guild_id:int, user_id:int, medium:int,
                        msg:discord.Message|None=None) -> bool:  # return True if the star was there already
