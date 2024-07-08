@@ -48,11 +48,6 @@ import datetime
 def calc_color(count:int) -> discord.Colour:
     return discord.Colour.from_rgb(255,255,max(0,min(255,1024//(count+4)-20)))
 
-def build_message(count:int, msg:discord.Message) -> dict:
-    return {"content": msg.jump_url,
-            "embed": discord.Embed(colour=calc_color(count), description=msg.content)
-                     .set_author(name=msg.author.display_name, icon_url=msg.author.display_avatar.url) }
-
 def ephemeral(c, *args, **kwargs): return c.response.send_message(*args, ephemeral=True, **kwargs)
 
 def on_time(msg_id:int, timeout_d:int) -> bool:  # True if the timeout hasn't passed yet
@@ -60,6 +55,12 @@ def on_time(msg_id:int, timeout_d:int) -> bool:  # True if the timeout hasn't pa
     send_time = discord.utils.snowflake_time(msg_id)
     return datetime.datetime.now(datetime.UTC) < send_time + datetime.timedelta(days=timeout_d)
 
+def short_disp(msg:discord.Message, escape=False) -> str:
+    return ( "[replying] "*(msg.reference is not None)
+           + (discord.utils.escape_markdown(msg.content.replace("\n","")) if escape else msg.content)
+           + " [attachment]"*len(msg.attachments)
+           + " [sticker]"*len(msg.stickers)
+           + " [poll]"*(msg.poll is not None))
 class NotConfigured(Exception): pass
 
 class Starboard(commands.Cog):
@@ -76,6 +77,24 @@ class Starboard(commands.Cog):
     async def db_fetchone(self, sql, parameters, default=None):  # avoids annoying double await
         a = await (await self.db.execute(sql, parameters)).fetchone()
         return a if a is not None else default # () is falsy :(
+
+    async def resolve_ref(self, ref:discord.MessageReference) -> discord.Message:
+        return ref.cached_message or await self.partial_msg(ref.channel_id,ref.message_id).fetch()
+    
+    async def build_message(self, count:int, msg:discord.Message) -> dict:
+        embed = discord.Embed(colour=calc_color(count), description=msg.content, timestamp=msg.created_at)
+        ats = len(msg.attachments)
+        if ats>0: embed.set_image(url=msg.attachments[0].url)
+        if ats>1: embed.set_footer(text=f"{ats-1} attachment{'s are' if ats!=2 else ' is'} not being shown")
+        embed.set_author(name=msg.author.display_name, icon_url=msg.author.display_avatar.url)
+        if msg.reference is not None:
+            try: reply = await self.resolve_ref(msg.reference)
+            except (discord.NotFound, discord.Forbidden): embed.add_field(name="replying to some message")
+            else:
+                embed.add_field(name=f"replying to {reply.author.display_name}", value=short_disp(reply), inline=False)
+                if ats==0 and len(reply.attachments)>0:
+                    embed.set_image(url=reply.attachments[0].url).set_footer(text="attachment shown is from reply")
+        return {"content":"⭐🌟💫🤩🌌"[min(4,count//5)]+" "+msg.jump_url, "embed":embed }
 
     @commands.hybrid_command(description="see some server-specific statistics for starboard")
     async def info(self, ctx:commands.Context):
@@ -98,17 +117,12 @@ class Starboard(commands.Cog):
                 await self.db.execute("SELECT msg,msg_ch FROM awarded WHERE guild=? "
                                       "ORDER BY (SELECT count(*) FROM stars WHERE msg=awarded.msg) DESC "
                                       "LIMIT 10", (ctx.guild.id,))])
-            def shorten(x): return x if len(x) < 401 else x[:400]+"…"
+            def shorten(x:str) -> str: return x[:400] + (x[400:] and "…")
             await ctx.send(allowed_mentions=discord.AllowedMentions.none(),embed=discord.Embed(
                 title="Top Messages in Starboard",
                 colour=discord.Colour.from_rgb(255,255,127),
                 description="\n".join(shorten(
-                    f"1. {msg.jump_url} **{msg.author.display_name}**: "
-                    + "[replying] "*(msg.reference is not None)
-                    + discord.utils.escape_markdown(msg.content.replace("\n",""))
-                    + " [attachment]"*len(msg.attachments)
-                    + " [sticker]"*len(msg.stickers)
-                    + " [poll]"*(msg.poll is not None))
+                    f"1. {msg.jump_url} **{msg.author.display_name}**: " + short_disp(msg, escape=True))
                 for msg in messages),
             ))
 
@@ -117,15 +131,15 @@ class Starboard(commands.Cog):
         msg_id,msg_ch_id = await self.db_fetchone(
             "SELECT msg,msg_ch FROM awarded WHERE guild=? ORDER BY random() LIMIT 1", (ctx.guild.id,))
         count, = await self.db_fetchone("SELECT count(*) FROM stars WHERE msg=?", (msg_id,))
-        await ctx.send(**build_message(count, await self.partial_msg(msg_ch_id,msg_id).fetch()))
+        await ctx.send(**await self.build_message(count, await self.partial_msg(msg_ch_id,msg_id).fetch()))
 
     @commands.command(description="show a certain starred message")
     async def show(self, ctx:commands.Context, msg:discord.Message|None):
         match msg, ctx.message.reference:
             case None, None: raise commands.MissingRequiredArgument("msg")
-            case None, ref:  msg = ref.cached_message or await self.partial_msg(ref.channel_id,ref.message_id).fetch()
+            case None, ref:  msg = await self.resolve_ref(ref)
         count, = await self.db_fetchone("SELECT count(*) FROM stars WHERE msg=?", (msg.id,))
-        await ctx.send(**build_message(count, msg))
+        await ctx.send(**await self.build_message(count, msg))
 
     @app_commands.command(description="change configuration like msg_sb channel or min stars")
     @app_commands.rename(sb="starboard-channel", minimum="minimum-star-count", timeout_d="timeout-in-days")
@@ -221,10 +235,10 @@ class Starboard(commands.Cog):
         msg = msg or await self.partial_msg(msg_ch_id,msg_id).fetch()
         match await self.db_fetchone("SELECT msg_sb FROM awarded WHERE msg=?", (msg_id,)):
             case msg_sb_id,:  # already in starboard, edit the message
-                await self.partial_msg(sb_id,msg_sb_id).edit(**build_message(count, msg))
+                await self.partial_msg(sb_id,msg_sb_id).edit(**await self.build_message(count, msg))
             case None if on_time(msg_id,timeout_d):
                 # not in starboard yet (usually bc count==minimum, or minimum was higher back then)
-                msg_sb = await self.bot.get_channel(sb_id).send(**build_message(count, msg))
+                msg_sb = await self.bot.get_channel(sb_id).send(**await self.build_message(count, msg))
                 await self.db.execute("INSERT INTO awarded(msg,msg_sb,msg_ch,guild,author) VALUES(?,?,?,?,?)",
                                       (msg_id, msg_sb.id, msg_ch_id, guild_id, msg.author.id))
         await self.db.commit()
@@ -244,11 +258,11 @@ class Starboard(commands.Cog):
             msg = msg or await self.partial_msg(msg_ch_id,msg_id).fetch()
             match await self.db_fetchone("SELECT msg_sb FROM awarded WHERE msg=?", (msg_id,)):
                 case msg_sb_id,:
-                    await self.partial_msg(sb_id,msg_sb_id).edit(**build_message(count, msg))
+                    await self.partial_msg(sb_id,msg_sb_id).edit(**await self.build_message(count, msg))
                 case None if on_time(msg_id,timeout_d):
                     # edge case: the message was and still is award-worthy, but it wasn't sent (probably because minimum
                     # was higher). we add it anyways, to be consistent with star add
-                    msg_sb = await self.bot.get_channel(sb_id).send(**build_message(count, msg))
+                    msg_sb = await self.bot.get_channel(sb_id).send(**await self.build_message(count, msg))
                     await self.db.execute("INSERT INTO awarded(msg,msg_sb,msg_ch,guild,author) VALUES(?,?,?,?,?)",
                                           (msg_id, msg_sb.id, msg_ch_id, guild_id, msg.author.id))
         await self.db.commit()
