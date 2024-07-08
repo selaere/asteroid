@@ -58,7 +58,7 @@ def ephemeral(c, *args, **kwargs): return c.response.send_message(*args, ephemer
 def on_time(msg_id:int, timeout_d:int) -> bool:  # True if the timeout hasn't passed yet
     if timeout_d is None: return True
     send_time = discord.utils.snowflake_time(msg_id)
-    return datetime.datetime.now(datetime.UTC) < send_time + datetime.timedelta(minutes=timeout_d)
+    return datetime.datetime.now(datetime.UTC) < send_time + datetime.timedelta(days=timeout_d)
 
 class NotConfigured(Exception): pass
 
@@ -91,11 +91,32 @@ class Starboard(commands.Cog):
                 msg += f"The starboard is toggled off right now."
         await ctx.send(msg)
 
+    @commands.hybrid_command(description="top messages")
+    async def top(self, ctx:commands.Context):
+        async with ctx.typing():
+            messages = await asyncio.gather(*[self.partial_msg(msg_ch,msg).fetch() async for msg,msg_ch in
+                await self.db.execute("SELECT msg,msg_ch FROM awarded WHERE guild=? "
+                                      "ORDER BY (SELECT count(*) FROM stars WHERE msg=awarded.msg) DESC "
+                                      "LIMIT 10", (ctx.guild.id,))])
+            def shorten(x): return x if len(x) < 401 else x[:400]+"…"
+            await ctx.send(allowed_mentions=discord.AllowedMentions.none(),embed=discord.Embed(
+                title="Top Messages in Starboard",
+                colour=discord.Colour.from_rgb(255,255,127),
+                description="\n".join(shorten(
+                    f"1. {msg.jump_url} **{msg.author.display_name}**: "
+                    + "[replying] "*(msg.reference is not None)
+                    + discord.utils.escape_markdown(msg.content.replace("\n",""))
+                    + " [attachment]"*len(msg.attachments)
+                    + " [sticker]"*len(msg.stickers)
+                    + " [poll]"*(msg.poll is not None))
+                for msg in messages),
+            ))
+
     @commands.hybrid_command(description="see a random starred message")
     async def random(self, ctx:commands.Context):
         msg_id,msg_ch_id = await self.db_fetchone(
             "SELECT msg,msg_ch FROM awarded WHERE guild=? ORDER BY random() LIMIT 1", (ctx.guild.id,))
-        count, = await self.db_fetchone("SELECT count(starrer) FROM stars WHERE msg=?", (msg_id,))
+        count, = await self.db_fetchone("SELECT count(*) FROM stars WHERE msg=?", (msg_id,))
         await ctx.send(**build_message(count, await self.partial_msg(msg_ch_id,msg_id).fetch()))
 
     @app_commands.command(description="change configuration like msg_sb channel or min stars")
@@ -185,7 +206,7 @@ class Starboard(commands.Cog):
         if (await self.db.execute("INSERT OR IGNORE INTO stars(starrer,msg,guild,medium) VALUES(?,?,?,?)",
                                   (user_id,msg_id,guild_id,medium))).rowcount == 0:
             return False
-        count, = await self.db_fetchone("SELECT count(starrer) FROM stars WHERE msg=?", (msg_id,))
+        count, = await self.db_fetchone("SELECT count(*) FROM stars WHERE msg=?", (msg_id,))
         if count<minimum:
             await self.db.commit()  # make sure to commit to add the star
             return True
@@ -207,7 +228,7 @@ class Starboard(commands.Cog):
         dlt = await self.db.execute("DELETE FROM stars WHERE starrer=? AND msg=? AND medium=?", (user_id, msg_id, medium))
         if dlt.rowcount == 0:
             return False # don't bother continuing if the star wasn't recorded or in a different medium
-        count, = await self.db_fetchone("SELECT count(starrer) FROM stars WHERE msg=?", (msg_id,))
+        count, = await self.db_fetchone("SELECT count(*) FROM stars WHERE msg=?", (msg_id,))
         if count<minimum and on_time(msg_id,timeout_d):  # message unawarded, or it wasn't awarded to begin with
             match await self.db_fetchone("DELETE FROM awarded WHERE msg=? RETURNING msg_sb", (msg_id,)):
                 case msg_sb_id,: await self.partial_msg(sb_id,msg_sb_id).delete()
@@ -229,3 +250,4 @@ async def setup(bot):
     await bot.db.executescript(SCHEMA)
     await bot.add_cog(Starboard(bot))
 
+if __name__ == "__main__": print("you ran the wrong file. BOZO")
