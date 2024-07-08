@@ -119,6 +119,14 @@ class Starboard(commands.Cog):
         count, = await self.db_fetchone("SELECT count(*) FROM stars WHERE msg=?", (msg_id,))
         await ctx.send(**build_message(count, await self.partial_msg(msg_ch_id,msg_id).fetch()))
 
+    @commands.command(description="show a certain starred message")
+    async def show(self, ctx:commands.Context, msg:discord.Message|None):
+        match msg, ctx.message.reference:
+            case None, None: raise commands.MissingRequiredArgument("msg")
+            case None, ref:  msg = ref.cached_message or await self.partial_msg(ref.channel_id,ref.message_id).fetch()
+        count, = await self.db_fetchone("SELECT count(*) FROM stars WHERE msg=?", (msg.id,))
+        await ctx.send(**build_message(count, msg))
+
     @app_commands.command(description="change configuration like msg_sb channel or min stars")
     @app_commands.rename(sb="starboard-channel", minimum="minimum-star-count", timeout_d="timeout-in-days")
     @app_commands.default_permissions(manage_channels=True)
