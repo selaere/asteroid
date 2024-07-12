@@ -42,15 +42,14 @@ import discord.app_commands as app_commands
 import discord.ext.commands as commands
 import aiosqlite
 import asyncio
-import logging
 import datetime
 
 def calc_color(count:int) -> discord.Colour:
-    return discord.Colour.from_rgb(255,255,max(0,min(255,1024//(count+4)-20)))
+    return discord.Colour.from_rgb(255, 255, max(0,min(255,1024//(count+4)-20)))
 
 def ephemeral(c, *args, **kwargs): return c.response.send_message(*args, ephemeral=True, **kwargs)
 
-def on_time(msg_id:int, timeout_d:int) -> bool:  # True if the timeout hasn't passed yet
+def on_time(msg_id:int, timeout_d:int|None) -> bool:  # True if the timeout hasn't passed yet
     if timeout_d is None: return True
     send_time = discord.utils.snowflake_time(msg_id)
     return datetime.datetime.now(datetime.UTC) < send_time + datetime.timedelta(days=timeout_d)
@@ -68,15 +67,14 @@ class Starboard(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.db: aiosqlite.Connection = bot.db
-        self.bot.tree.add_command(app_commands.ContextMenu(name="⭐ Star",  callback=self.star_menu  ),override=True)
-        self.bot.tree.add_command(app_commands.ContextMenu(name="⭐ Unstar",callback=self.unstar_menu),override=True)
+        self.bot.tree.add_command(app_commands.ContextMenu(name="⭐ Star",  callback=self.star_menu  ), override=True)
+        self.bot.tree.add_command(app_commands.ContextMenu(name="⭐ Unstar",callback=self.unstar_menu), override=True)
 
     def partial_msg(self, channel:int, id:int) -> discord.PartialMessage:
         return self.bot.get_channel(channel).get_partial_message(id)
     
-    async def db_fetchone(self, sql, parameters, default=None):  # avoids annoying double await
-        a = await (await self.db.execute(sql, parameters)).fetchone()
-        return a if a is not None else default # () is falsy :(
+    async def db_fetchone(self, sql, parameters) -> tuple|None:  # avoids annoying double await
+        return await (await self.db.execute(sql, parameters)).fetchone()
 
     async def resolve_ref(self, ref:discord.MessageReference) -> discord.Message:
         return ref.cached_message or await self.partial_msg(ref.channel_id,ref.message_id).fetch()
@@ -89,7 +87,7 @@ class Starboard(commands.Cog):
         embed.set_author(name=msg.author.display_name, icon_url=msg.author.display_avatar.url)
         if msg.reference is not None:
             try: reply = await self.resolve_ref(msg.reference)
-            except (discord.NotFound, discord.Forbidden): embed.add_field(name="replying to some message")
+            except (discord.NotFound, discord.Forbidden): embed.add_field(name="replying to some message",value="sorry")
             else:
                 embed.add_field(name=f"replying to {reply.author.display_name}", value=short_disp(reply), inline=False)
                 if ats==0 and len(reply.attachments)>0:
@@ -182,6 +180,7 @@ class Starboard(commands.Cog):
         r  = await self.get_guild_info(ev.guild_id)
         r |= await self.find_msg(msg_id=ev.message_id, msg_ch_id=ev.channel_id, **r)
         if not await self.add_star(user_id=ev.user_id, **r):
+            # the star was added in a different medium. delete it and forget
             await self.partial_msg(ev.channel_id,ev.message_id).remove_reaction("⭐", discord.Object(ev.user_id))
 
     @commands.Cog.listener()
@@ -204,12 +203,10 @@ class Starboard(commands.Cog):
         await ephemeral(c, "ok" if success else "couldn't remove star")
 
     async def get_guild_info(self, guild_id:int) -> dict:
-        try:
-            minimum,sb_id,timeout_d = await self.db_fetchone(
-                "SELECT minimum,sb,timeout FROM guilds WHERE guild=?", (guild_id,))
-        except TypeError as e:
-            raise NotConfigured() from e
-        return {"minimum":minimum, "sb_id":sb_id, "timeout_d":timeout_d, "guild_id":guild_id}
+        match await self.db_fetchone("SELECT minimum,sb,timeout FROM guilds WHERE guild=?", (guild_id,)):
+            case None: raise NotConfigured()
+            case minimum,sb_id,timeout_d:
+                return {"minimum":minimum, "sb_id":sb_id, "timeout_d":timeout_d, "guild_id":guild_id}
 
     async def find_msg(self, minimum:int, sb_id:int, msg_id:int, msg_ch_id:int, guild_id:int,
                        msg:discord.Message|None=None, **_) -> dict:
@@ -223,11 +220,10 @@ class Starboard(commands.Cog):
         return {"msg_id":msg_id, "msg_ch_id":msg_ch_id, "medium":medium, "msg":msg}
     
     async def add_star(self, minimum:int, sb_id:int, timeout_d:int|None, msg_id:int, msg_ch_id:int, guild_id:int,
-                       user_id:int, medium:int, msg:discord.Message|None=None
-                      ) -> bool:  # return True if the star was there already
+                       user_id:int, medium:int, msg:discord.Message|None=None) -> bool:
         if (await self.db.execute("INSERT OR IGNORE INTO stars(starrer,msg,guild,medium) VALUES(?,?,?,?)",
                                   (user_id,msg_id,guild_id,medium))).rowcount == 0:
-            return False
+            return False  # if the star was there already (when above query fails uniqueness constraint)
         count, = await self.db_fetchone("SELECT count(*) FROM stars WHERE msg=?", (msg_id,))
         if count<minimum:
             await self.db.commit()  # make sure to commit to add the star
@@ -235,7 +231,8 @@ class Starboard(commands.Cog):
         msg = msg or await self.partial_msg(msg_ch_id,msg_id).fetch()
         match await self.db_fetchone("SELECT msg_sb FROM awarded WHERE msg=?", (msg_id,)):
             case msg_sb_id,:  # already in starboard, edit the message
-                await self.partial_msg(sb_id,msg_sb_id).edit(**await self.build_message(count, msg))
+                try: await self.partial_msg(sb_id,msg_sb_id).edit(**await self.build_message(count, msg))
+                except discord.Forbidden: pass  # if the message was deleted, or on migration
             case None if on_time(msg_id,timeout_d):
                 # not in starboard yet (usually bc count==minimum, or minimum was higher back then)
                 msg_sb = await self.bot.get_channel(sb_id).send(**await self.build_message(count, msg))
@@ -258,10 +255,11 @@ class Starboard(commands.Cog):
             msg = msg or await self.partial_msg(msg_ch_id,msg_id).fetch()
             match await self.db_fetchone("SELECT msg_sb FROM awarded WHERE msg=?", (msg_id,)):
                 case msg_sb_id,:
-                    await self.partial_msg(sb_id,msg_sb_id).edit(**await self.build_message(count, msg))
+                    try: await self.partial_msg(sb_id,msg_sb_id).edit(**await self.build_message(count, msg))
+                    except discord.Forbidden: pass  # if the message was deleted, or on migration
                 case None if on_time(msg_id,timeout_d):
-                    # edge case: the message was and still is award-worthy, but it wasn't sent (probably because minimum
-                    # was higher). we add it anyways, to be consistent with star add
+                    # edge case: the message was and still is award-worthy, but it wasn't sent (maybe because minimum
+                    # was higher), and the timeout hasn't passed. we add it anyways, to be consistent with star add
                     msg_sb = await self.bot.get_channel(sb_id).send(**await self.build_message(count, msg))
                     await self.db.execute("INSERT INTO awarded(msg,msg_sb,msg_ch,guild,author) VALUES(?,?,?,?,?)",
                                           (msg_id, msg_sb.id, msg_ch_id, guild_id, msg.author.id))
