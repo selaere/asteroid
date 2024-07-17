@@ -104,6 +104,113 @@ class Starboard(commands.Cog):
                     embed.set_image(url=reply.attachments[0].url).set_footer(text="attachment shown is from reply")
         return { "content":"⭐🌟💫🤩🌌"[min(4,count//5)]+" "+msg.jump_url, "embed":embed }
 
+    ### STARRING
+    # can work with reactions (`on_raw_reaction_{add,remove}`, "raw" in case someone stars older messages)
+    #     or the pop up menu (`{,un}star_menu`, added in `__main__`).
+    # these are quite different.interactions and reaction events and command contexts (if i want to add those later)
+    #     all have slightly different interfaces to get the different IDs (the info we actually want),
+    #     and raw reaction events give only a channel/message ID, but menus give you the full message already.
+    # so these four↓ functions actually do nothing except glue together `get_guild_info`, `find_msg` and
+    #     `{add,remove}_star` that do the actual work. we pass around the data in a big dict `r` because it looks nicer
+    #     (i think), and we use the same variable names as the db with an occasional `_id` added to the end 
+    # note that we delay the ms fetching until we know the star went through, as we only need it to post the message in
+    #     the starboard. we also don't use the message cache explicitly because there seems to not be an easy way to do
+    #     it and also LyricLy called it "uselesscore"
+
+    @commands.Cog.listener()
+    async def on_raw_reaction_add(self, ev:discord.RawReactionActionEvent):
+        if ev.emoji.name != "⭐": return
+        r  = await self.get_guild_info(ev.guild_id)
+        r |= await self.find_msg(msg_id=ev.message_id, msg_ch_id=ev.channel_id, **r)
+        if not await self.add_star(user_id=ev.user_id, **r):
+            # the star was added in a different medium. delete it and forget
+            await self.partial_msg(ev.channel_id,ev.message_id).remove_reaction("⭐", discord.Object(ev.user_id))
+
+    @commands.Cog.listener()
+    async def on_raw_reaction_remove(self, ev:discord.RawReactionActionEvent):
+        if ev.emoji.name != "⭐": return
+        r  = await self.get_guild_info(ev.guild_id)
+        r |= await self.find_msg(msg_id=ev.message_id, msg_ch_id=ev.channel_id, **r)
+        await self.remove_star(user_id=ev.user_id, **r)
+    
+    async def star_menu(self, c:discord.Interaction, msg:discord.Message):
+        r  = await self.get_guild_info(c.guild_id)
+        r |= await self.find_msg(msg_id=msg.id, msg_ch_id=msg.channel.id, msg=msg, **r) | {"medium":2}
+        success = await self.add_star(user_id=c.user.id, **r)
+        await ephemeral(c, "ok" if success else "you already starred that, bozo!")
+
+    async def unstar_menu(self, c:discord.Interaction, msg:discord.Message):
+        r  = await self.get_guild_info(c.guild_id)
+        r |= await self.find_msg(msg_id=msg.id, msg_ch_id=msg.channel.id, msg=msg, **r) | {"medium":2}
+        success = await self.remove_star(user_id=c.user.id, **r)
+        await ephemeral(c, "ok" if success else "couldn't remove star")
+
+    async def get_guild_info(self, guild_id:int) -> dict:
+        match await self.db_fetchone("SELECT minimum,sb,timeout FROM guilds WHERE guild=?", (guild_id,)):
+            case None: raise NotConfigured()
+            case minimum,sb_id,timeout_d:
+                return {"minimum":minimum, "sb_id":sb_id, "timeout_d":timeout_d, "guild_id":guild_id}
+
+    # if the message was a starboard message, we want to star the original instead.
+    # this sets medium to 1 if this happened. the menu functions ignore this, overriding it with medium=2, because we
+    #     don't need to keep track where the user right clicked.
+    async def find_msg(self, minimum:int, sb_id:int, msg_id:int, msg_ch_id:int, guild_id:int,
+                       msg:discord.Message|None=None) -> dict:  # <- useless type annotation 
+        medium = 0
+        if msg_ch_id == sb_id:
+            try:
+                msg_id,msg_ch_id = await self.db_fetchone("SELECT msg,msg_ch FROM awarded WHERE msg_sb=?", (msg_id,))
+                medium = 1
+                msg = None  # the message from the menu is NO LONGER the right message
+            except TypeError: pass  # message in starboard but not managed by this bot. i'll allow starring it
+        return {"msg_id":msg_id, "msg_ch_id":msg_ch_id, "medium":medium, "msg":msg}
+    
+    async def add_star(self, minimum:int, sb_id:int, timeout_d:int|None, msg_id:int, msg_ch_id:int, guild_id:int,
+                       user_id:int, medium:int, msg:discord.Message|None=None) -> bool:
+        if (await self.db.execute("INSERT OR IGNORE INTO stars(starrer,msg,guild,medium) VALUES(?,?,?,?)",
+                                  (user_id,msg_id,guild_id,medium))).rowcount == 0:
+            return False  # if the star was there already (when above query fails uniqueness constraint)
+        count, = await self.db_fetchone("SELECT count(*) FROM stars WHERE msg=?", (msg_id,))
+        if count<minimum:
+            await self.db.commit()  # make sure to commit to add the star
+            return True
+        msg = msg or await self.fetch_msg(msg_ch_id,msg_id)
+        match await self.db_fetchone("SELECT msg_sb FROM awarded WHERE msg=?", (msg_id,)):
+            case msg_sb_id,:  # already in starboard, edit the message
+                try: await self.partial_msg(sb_id,msg_sb_id).edit(**await self.build_message(count, msg))
+                except discord.Forbidden: pass  # if the message was deleted, or on migration
+            case None if on_time(msg_id,timeout_d):
+                # not in starboard yet (usually bc count==minimum, or minimum was higher back then)
+                msg_sb = await self.bot.get_channel(sb_id).send(**await self.build_message(count, msg))
+                await self.db.execute("INSERT INTO awarded(msg,msg_sb,msg_ch,guild,author) VALUES(?,?,?,?,?)",
+                                      (msg_id, msg_sb.id, msg_ch_id, guild_id, msg.author.id))
+        await self.db.commit()
+        return True
+    
+    async def remove_star(self, minimum:int, sb_id:int, timeout_d:int|None, msg_id:int, msg_ch_id:int, guild_id:int,
+                          user_id:int, medium:int, msg:discord.Message|None=None) -> bool:
+        dlt = await self.db.execute("DELETE FROM stars WHERE starrer=? AND msg=? AND medium=?", (user_id,msg_id,medium))
+        if dlt.rowcount == 0:
+            return False # don't bother continuing if the star wasn't recorded or in a different medium
+        count, = await self.db_fetchone("SELECT count(*) FROM stars WHERE msg=?", (msg_id,))
+        if count<minimum and on_time(msg_id,timeout_d):  # message unawarded, or it wasn't awarded to begin with
+            match await self.db_fetchone("DELETE FROM awarded WHERE msg=? RETURNING msg_sb", (msg_id,)):
+                case msg_sb_id,: await self.partial_msg(sb_id,msg_sb_id).delete()
+        else:  # unstarred, but the message can stay in starboard
+            msg = msg or await self.fetch_msg(msg_ch_id,msg_id)
+            match await self.db_fetchone("SELECT msg_sb FROM awarded WHERE msg=?", (msg_id,)):
+                case msg_sb_id,:
+                    try: await self.partial_msg(sb_id,msg_sb_id).edit(**await self.build_message(count, msg))
+                    except discord.Forbidden: pass  # if the message was deleted, or on migration
+                case None if on_time(msg_id,timeout_d):
+                    # edge case: the message was and still is award-worthy, but it wasn't sent (maybe because minimum
+                    # was higher), and the timeout hasn't passed. we add it anyways, to be consistent with star add
+                    msg_sb = await self.bot.get_channel(sb_id).send(**await self.build_message(count, msg))
+                    await self.db.execute("INSERT INTO awarded(msg,msg_sb,msg_ch,guild,author) VALUES(?,?,?,?,?)",
+                                          (msg_id, msg_sb.id, msg_ch_id, guild_id, msg.author.id))
+        await self.db.commit()
+        return True
+
     ### COMMANDS
 
     @commands.hybrid_command()
@@ -241,113 +348,6 @@ class Starboard(commands.Cog):
             '\nstar count mismatches: '       *(len(mismatches)!=0) + ", ".join(i.jump_url for i in mismatches) +
             "\nmessages i didn't understand: "*(len(unparsable)!=0) + ", ".join(i.jump_url for i in unparsable) +
             "\nnow you need to unconfigure r.danny and configure asteroid, i think")
-
-    ### STARRING
-    # can work with reactions (`on_raw_reaction_{add,remove}`, "raw" in case someone stars older messages)
-    #     or the pop up menu (`{,un}star_menu`, added in `__main__`).
-    # these are quite different.interactions and reaction events and command contexts (if i want to add those later)
-    #     all have slightly different interfaces to get the different IDs (the info we actually want),
-    #     and raw reaction events give only a channel/message ID, but menus give you the full message already.
-    # so these four↓ functions actually do nothing except glue together `get_guild_info`, `find_msg` and
-    #     `{add,remove}_star` that do the actual work. we pass around the data in a big dict `r` because it looks nicer
-    #     (i think), and we use the same variable names as the db with an occasional `_id` added to the end 
-    # note that we delay the ms fetching until we know the star went through, as we only need it to post the message in
-    #     the starboard. we also don't use the message cache explicitly because there seems to not be an easy way to do
-    #     it and also LyricLy called it "uselesscore"
-
-    @commands.Cog.listener()
-    async def on_raw_reaction_add(self, ev:discord.RawReactionActionEvent):
-        if ev.emoji.name != "⭐": return
-        r  = await self.get_guild_info(ev.guild_id)
-        r |= await self.find_msg(msg_id=ev.message_id, msg_ch_id=ev.channel_id, **r)
-        if not await self.add_star(user_id=ev.user_id, **r):
-            # the star was added in a different medium. delete it and forget
-            await self.partial_msg(ev.channel_id,ev.message_id).remove_reaction("⭐", discord.Object(ev.user_id))
-
-    @commands.Cog.listener()
-    async def on_raw_reaction_remove(self, ev:discord.RawReactionActionEvent):
-        if ev.emoji.name != "⭐": return
-        r  = await self.get_guild_info(ev.guild_id)
-        r |= await self.find_msg(msg_id=ev.message_id, msg_ch_id=ev.channel_id, **r)
-        await self.remove_star(user_id=ev.user_id, **r)
-    
-    async def star_menu(self, c:discord.Interaction, msg:discord.Message):
-        r  = await self.get_guild_info(c.guild_id)
-        r |= await self.find_msg(msg_id=msg.id, msg_ch_id=msg.channel.id, msg=msg, **r) | {"medium":2}
-        success = await self.add_star(user_id=c.user.id, **r)
-        await ephemeral(c, "ok" if success else "you already starred that, bozo!")
-
-    async def unstar_menu(self, c:discord.Interaction, msg:discord.Message):
-        r  = await self.get_guild_info(c.guild_id)
-        r |= await self.find_msg(msg_id=msg.id, msg_ch_id=msg.channel.id, msg=msg, **r) | {"medium":2}
-        success = await self.remove_star(user_id=c.user.id, **r)
-        await ephemeral(c, "ok" if success else "couldn't remove star")
-
-    async def get_guild_info(self, guild_id:int) -> dict:
-        match await self.db_fetchone("SELECT minimum,sb,timeout FROM guilds WHERE guild=?", (guild_id,)):
-            case None: raise NotConfigured()
-            case minimum,sb_id,timeout_d:
-                return {"minimum":minimum, "sb_id":sb_id, "timeout_d":timeout_d, "guild_id":guild_id}
-
-    # if the message was a starboard message, we want to star the original instead.
-    # this sets medium to 1 if this happened. the menu functions ignore this, overriding it with medium=2, because we
-    #     don't need to keep track where the user right clicked.
-    async def find_msg(self, minimum:int, sb_id:int, msg_id:int, msg_ch_id:int, guild_id:int,
-                       msg:discord.Message|None=None) -> dict:  # <- useless type annotation 
-        medium = 0
-        if msg_ch_id == sb_id:
-            try:
-                msg_id,msg_ch_id = await self.db_fetchone("SELECT msg,msg_ch FROM awarded WHERE msg_sb=?", (msg_id,))
-                medium = 1
-                msg = None  # the message from the menu is NO LONGER the right message
-            except TypeError: pass  # message in starboard but not managed by this bot. i'll allow starring it
-        return {"msg_id":msg_id, "msg_ch_id":msg_ch_id, "medium":medium, "msg":msg}
-    
-    async def add_star(self, minimum:int, sb_id:int, timeout_d:int|None, msg_id:int, msg_ch_id:int, guild_id:int,
-                       user_id:int, medium:int, msg:discord.Message|None=None) -> bool:
-        if (await self.db.execute("INSERT OR IGNORE INTO stars(starrer,msg,guild,medium) VALUES(?,?,?,?)",
-                                  (user_id,msg_id,guild_id,medium))).rowcount == 0:
-            return False  # if the star was there already (when above query fails uniqueness constraint)
-        count, = await self.db_fetchone("SELECT count(*) FROM stars WHERE msg=?", (msg_id,))
-        if count<minimum:
-            await self.db.commit()  # make sure to commit to add the star
-            return True
-        msg = msg or await self.fetch_msg(msg_ch_id,msg_id)
-        match await self.db_fetchone("SELECT msg_sb FROM awarded WHERE msg=?", (msg_id,)):
-            case msg_sb_id,:  # already in starboard, edit the message
-                try: await self.partial_msg(sb_id,msg_sb_id).edit(**await self.build_message(count, msg))
-                except discord.Forbidden: pass  # if the message was deleted, or on migration
-            case None if on_time(msg_id,timeout_d):
-                # not in starboard yet (usually bc count==minimum, or minimum was higher back then)
-                msg_sb = await self.bot.get_channel(sb_id).send(**await self.build_message(count, msg))
-                await self.db.execute("INSERT INTO awarded(msg,msg_sb,msg_ch,guild,author) VALUES(?,?,?,?,?)",
-                                      (msg_id, msg_sb.id, msg_ch_id, guild_id, msg.author.id))
-        await self.db.commit()
-        return True
-    
-    async def remove_star(self, minimum:int, sb_id:int, timeout_d:int|None, msg_id:int, msg_ch_id:int, guild_id:int,
-                          user_id:int, medium:int, msg:discord.Message|None=None) -> bool:
-        dlt = await self.db.execute("DELETE FROM stars WHERE starrer=? AND msg=? AND medium=?", (user_id,msg_id,medium))
-        if dlt.rowcount == 0:
-            return False # don't bother continuing if the star wasn't recorded or in a different medium
-        count, = await self.db_fetchone("SELECT count(*) FROM stars WHERE msg=?", (msg_id,))
-        if count<minimum and on_time(msg_id,timeout_d):  # message unawarded, or it wasn't awarded to begin with
-            match await self.db_fetchone("DELETE FROM awarded WHERE msg=? RETURNING msg_sb", (msg_id,)):
-                case msg_sb_id,: await self.partial_msg(sb_id,msg_sb_id).delete()
-        else:  # unstarred, but the message can stay in starboard
-            msg = msg or await self.fetch_msg(msg_ch_id,msg_id)
-            match await self.db_fetchone("SELECT msg_sb FROM awarded WHERE msg=?", (msg_id,)):
-                case msg_sb_id,:
-                    try: await self.partial_msg(sb_id,msg_sb_id).edit(**await self.build_message(count, msg))
-                    except discord.Forbidden: pass  # if the message was deleted, or on migration
-                case None if on_time(msg_id,timeout_d):
-                    # edge case: the message was and still is award-worthy, but it wasn't sent (maybe because minimum
-                    # was higher), and the timeout hasn't passed. we add it anyways, to be consistent with star add
-                    msg_sb = await self.bot.get_channel(sb_id).send(**await self.build_message(count, msg))
-                    await self.db.execute("INSERT INTO awarded(msg,msg_sb,msg_ch,guild,author) VALUES(?,?,?,?,?)",
-                                          (msg_id, msg_sb.id, msg_ch_id, guild_id, msg.author.id))
-        await self.db.commit()
-        return True
 
 async def setup(bot):
     await bot.db.executescript(SCHEMA)
