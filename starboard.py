@@ -60,7 +60,8 @@ def short_disp(msg:discord.Message, escape=False) -> str:
            + (discord.utils.escape_markdown(msg.content.replace("\n","")) if escape else msg.content)
            + " [attachment]"*len(msg.attachments)
            + " [sticker]"*len(msg.stickers)
-           + " [poll]"*(msg.poll is not None))
+           + " [poll]"*(msg.poll is not None)
+           + " [edited]"*(msg.edited_at is not None))
 class NotConfigured(Exception): pass
 
 class Starboard(commands.Cog):
@@ -177,31 +178,42 @@ class Starboard(commands.Cog):
     
     @commands.command()
     @commands.has_permissions(manage_channels=True)
-    async def migrate_rdanny(self, ctx:commands.Context):
-        r = await self.get_guild_info(ctx.guild.id)
-        sb = self.bot.get_channel(r["sb_id"])
+    async def import_rdanny(self, ctx:commands.Context, sb:discord.TextChannel):
         scanned = 0
+        mismatches:list[discord.Message] = []
+        unparsable:list[discord.Message] = []
         async for msg_sb in sb.history(limit=None):
-            if msg_sb.author.id == 80528701850124288 and (m := re.fullmatch(r".+?<#(\d+)> ID: (\d+)", msg_sb.content)):
-                msg_ch_id,msg_id = int(m[1]),int(m[2])
-                msg:discord.Message = await self.partial_msg(msg_ch_id,msg_id).fetch()
-                # get original stars
-                if (stars := discord.utils.get(msg.reactions, emoji="⭐")):
-                    async for starrer in stars.users():
-                        await self.db.execute("INSERT OR IGNORE INTO stars(starrer,msg,guild,medium) VALUES(?,?,?,0)",
-                            (starrer.id,msg_id,ctx.guild.id))
-                # get msg_sb stars
-                if (stars := discord.utils.get(msg_sb.reactions, emoji="⭐")):
-                    async for starrer in stars.users():
-                        await self.db.execute("INSERT OR IGNORE INTO stars(starrer,msg,guild,medium) VALUES(?,?,?,1)",
-                            (starrer.id,msg_id,ctx.guild.id))
-                # ignore stars added by command (who even does that?)
-                # add awarded
-                await self.db.execute("INSERT OR IGNORE INTO awarded(msg,msg_sb,msg_ch,guild,author) VALUES(?,?,?,?,?)",
-                                      (msg_id, msg_sb.id, msg_ch_id, ctx.guild.id, msg.author.id))
-                scanned += 1
+            if msg_sb.author.id != 80528701850124288: continue 
+            if not (m := re.fullmatch(r".(?: \*\*(\d+)\*\*)? <#(\d+)> ID: (\d+)", msg_sb.content)):
+                unparsable.append(msg_sb)
+                continue
+            count, msg_ch_id, msg_id = int(m[1] or "1"), int(m[2]), int(m[3])
+            msg:discord.Message = await self.partial_msg(msg_ch_id,msg_id).fetch()
+            cnt_before = self.db.total_changes
+            # get original stars
+            if (stars := discord.utils.get(msg.reactions, emoji="⭐")):
+                async for starrer in stars.users():
+                    if starrer.id == msg.author.id: continue
+                    await self.db.execute("INSERT OR IGNORE INTO stars(starrer,msg,guild,medium) VALUES(?,?,?,0)",
+                        (starrer.id,msg_id,ctx.guild.id))
+            # get msg_sb stars
+            if (stars := discord.utils.get(msg_sb.reactions, emoji="⭐")):
+                async for starrer in stars.users():
+                    if starrer == msg.author.id: continue
+                    await self.db.execute("INSERT OR IGNORE INTO stars(starrer,msg,guild,medium) VALUES(?,?,?,1)",
+                        (starrer.id,msg_id,ctx.guild.id))
+            # ignore stars added by command (who even does that?)
+            cnt_computed = self.db.total_changes - cnt_before
+            if cnt_computed != count: mismatches.append(msg_sb)
+            # add awarded
+            await self.db.execute("INSERT OR IGNORE INTO awarded(msg,msg_sb,msg_ch,guild,author) VALUES(?,?,?,?,?)",
+                                    (msg_id, msg_sb.id, msg_ch_id, ctx.guild.id, msg.author.id))
+            scanned += 1
         await self.db.commit()
-        await ctx.send(f"done! {scanned}")
+        await ctx.send(f"{scanned} messages added" +
+            '\nstar count mismatches: '       *(len(mismatches)!=0) + ', '.join(i.jump_url for i in mismatches) +
+            "\nmessages i didn't understand: "*(len(unparsable)!=0) + ", ".join(i.jump_url for i in unparsable) +
+            "\nnow you need to unconfigure r.danny and configure asteroid, i think")
 
     @commands.Cog.listener()
     async def on_raw_reaction_add(self, ev:discord.RawReactionActionEvent):
