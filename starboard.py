@@ -44,6 +44,7 @@ import aiosqlite
 import asyncio
 import datetime
 import re
+import logging
 
 def calc_color(count:int) -> discord.Colour:
     return discord.Colour.from_rgb(255, 255, max(0,min(255,1024//(count+4)-20)))
@@ -79,8 +80,8 @@ class Starboard(commands.Cog):
     # these aren't that annoying i'm just a professional coper
     def partial_msg(self, channel:int, id:int) -> discord.PartialMessage:
         return self.bot.get_channel(channel).get_partial_message(id)
-    def fecth_msg(self, channel:int, id:int) -> discord.Message:
-        return self.bot.get_channel(channel).fetch_message(id)
+    async def fetch_msg(self, channel:int, id:int) -> discord.Message:
+        return await self.bot.get_channel(channel).fetch_message(id)
     
     async def db_fetchone(self, sql, parameters) -> tuple|None:  # avoids annoying double await
         return await (await self.db.execute(sql, parameters)).fetchone()
@@ -259,7 +260,7 @@ class Starboard(commands.Cog):
         :param msg: the message to show. may be given as a reply, or as an ID if in the same channel, or as a jump link.
         """
         match msg, ctx.message.reference:
-            case None, None: raise commands.MissingRequiredArgument("msg")
+            case None, None: return await ctx.send("can you elaborate")
             case None, ref:  msg = await self.resolve_ref(ref)
         count, = await self.db_fetchone("SELECT count(*) FROM stars WHERE msg=?", (msg.id,))
         await ctx.send(**await self.build_message(count, msg))
@@ -345,9 +346,21 @@ class Starboard(commands.Cog):
             scanned += 1
         await self.db.commit()
         await ctx.send(f"{scanned} messages added" +
-            '\nstar count mismatches: '       *(len(mismatches)!=0) + ", ".join(i.jump_url for i in mismatches) +
+            "\nstar count mismatches: "       *(len(mismatches)!=0) + ", ".join(i.jump_url for i in mismatches) +
             "\nmessages i didn't understand: "*(len(unparsable)!=0) + ", ".join(i.jump_url for i in unparsable) +
             "\nnow you need to unconfigure r.danny and configure asteroid, i think")
+    
+    ### ERRORS
+    
+    @commands.Cog.listener()
+    async def on_command_error(self, ctx:commands.Context, exc:Exception) -> None:
+        if isinstance(exc, commands.MissingRequiredArgument):                  await ctx.send("can you elaborate")
+        elif isinstance(exc, commands.BadArgument):                            await ctx.send("wdym")
+        elif isinstance(exc, commands.CommandNotFound):                        pass
+        elif isinstance(exc, (commands.MissingPermissions,commands.NotOwner)): await ctx.send("wrong alt. bozo")
+        else:
+            await ctx.send(f"{exc} :(")
+            logging.exception(":(")
 
 async def setup(bot):
     await bot.db.executescript(SCHEMA)
