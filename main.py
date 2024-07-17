@@ -41,9 +41,10 @@ async def sql(ctx:commands.Context, *, query:str):
 @commands.is_owner()
 async def sync(ctx:commands.Context):
     await bot.tree.sync()
+    await ctx.send("ok")
 
 async def do():
-    bot.db=aiosqlite.connect("bees.db")
+    bot.db = aiosqlite.connect("bees.db")
     async with bot, bot.db:
         await bot.load_extension("starboard")
         with open("token") as f: tok=f.read().strip()

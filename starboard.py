@@ -50,12 +50,13 @@ def calc_color(count:int) -> discord.Colour:
 
 def ephemeral(c, *args, **kwargs): return c.response.send_message(*args, ephemeral=True, **kwargs)
 
-def on_time(msg_id:int, timeout_d:int|None) -> bool:  # True if the timeout hasn't passed yet
+# True if the timeout hasn't passed yet. used as a precondition to adding/removing a message from the starboard
+def on_time(msg_id:int, timeout_d:int|None) -> bool:
     if timeout_d is None: return True
     send_time = discord.utils.snowflake_time(msg_id)
     return datetime.datetime.now(datetime.UTC) < send_time + datetime.timedelta(days=timeout_d)
 
-def short_disp(msg:discord.Message, escape=False) -> str:
+def short_disp(msg:discord.Message, escape=False) -> str:  # used for the *top messages and also replies in starboard
     return ( "[replying] "*(msg.reference is not None)
            + (discord.utils.escape_markdown(msg.content.replace("\n","")) if escape else msg.content)
            + " [attachment]"*len(msg.attachments)
@@ -66,38 +67,48 @@ class NotConfigured(Exception): pass
 
 class Starboard(commands.Cog):
 
-    def __init__(self, bot):
+    def __init__(self, bot:commands.Bot) -> None:
         self.bot = bot
-        self.db: aiosqlite.Connection = bot.db
+        self.db: aiosqlite.Connection = bot.db  # shortcut :3
+        # yes you need to register these manually
         self.bot.tree.add_command(app_commands.ContextMenu(name="⭐ Star",  callback=self.star_menu  ), override=True)
         self.bot.tree.add_command(app_commands.ContextMenu(name="⭐ Unstar",callback=self.unstar_menu), override=True)
 
+    ### HELPERS
+
+    # these aren't that annoying i'm just a professional coper
     def partial_msg(self, channel:int, id:int) -> discord.PartialMessage:
         return self.bot.get_channel(channel).get_partial_message(id)
+    def fecth_msg(self, channel:int, id:int) -> discord.Message:
+        return self.bot.get_channel(channel).fetch_message(id)
     
     async def db_fetchone(self, sql, parameters) -> tuple|None:  # avoids annoying double await
         return await (await self.db.execute(sql, parameters)).fetchone()
 
     async def resolve_ref(self, ref:discord.MessageReference) -> discord.Message:
-        return ref.cached_message or await self.partial_msg(ref.channel_id,ref.message_id).fetch()
+        return ref.cached_message or await self.fetch_msg(ref.channel_id,ref.message_id)
     
+    # builds a message for starboard. given in this funny way so it can be unpacked into edit/send
     async def build_message(self, count:int, msg:discord.Message) -> dict:
         embed = discord.Embed(colour=calc_color(count), description=msg.content, timestamp=msg.created_at)
-        ats = len(msg.attachments)
-        if ats>0: embed.set_image(url=msg.attachments[0].url)
-        if ats>1: embed.set_footer(text=f"{ats-1} attachment{'s are' if ats!=2 else ' is'} not being shown")
+        att_no = len(msg.attachments)
+        if att_no>0: embed.set_image(url=msg.attachments[0].url)
+        if att_no>1: embed.set_footer(text=f"{att_no-1} attachment{'s are' if att_no!=2 else ' is'} not being shown")
         embed.set_author(name=msg.author.display_name, icon_url=msg.author.display_avatar.url)
         if msg.reference is not None:
             try: reply = await self.resolve_ref(msg.reference)
             except (discord.NotFound, discord.Forbidden): embed.add_field(name="replying to some message",value="sorry")
             else:
                 embed.add_field(name=f"replying to {reply.author.display_name}", value=short_disp(reply), inline=False)
-                if ats==0 and len(reply.attachments)>0:
+                if att_no==0 and len(reply.attachments)>0:
                     embed.set_image(url=reply.attachments[0].url).set_footer(text="attachment shown is from reply")
-        return {"content":"⭐🌟💫🤩🌌"[min(4,count//5)]+" "+msg.jump_url, "embed":embed }
+        return { "content":"⭐🌟💫🤩🌌"[min(4,count//5)]+" "+msg.jump_url, "embed":embed }
 
-    @commands.hybrid_command(description="see some server-specific statistics for starboard")
+    ### COMMANDS
+
+    @commands.hybrid_command()
     async def info(self, ctx:commands.Context):
+        """see some server-specific statistics for starboard."""
         total_stars,starred_messages = await self.db_fetchone(
             "SELECT count(*),count(DISTINCT msg) FROM stars WHERE guild=?", (ctx.guild.id,))
         msg = f"Hi, i am asteroid ^_^\nI have seen {total_stars} stars and {starred_messages} starred messages.\n"
@@ -110,10 +121,11 @@ class Starboard(commands.Cog):
                 msg += f"The starboard is toggled off right now."
         await ctx.send(msg)
 
-    @commands.hybrid_command(description="top messages")
+    @commands.hybrid_command()
     async def top(self, ctx:commands.Context):
+        """see the top starred messages in the current guild."""
         async with ctx.typing():
-            messages = await asyncio.gather(*[self.partial_msg(msg_ch,msg).fetch() async for msg,msg_ch in
+            messages = await asyncio.gather(*[self.fetch_msg async for msg,msg_ch in
                 await self.db.execute("SELECT msg,msg_ch FROM awarded WHERE guild=? "
                                       "ORDER BY (SELECT count(*) FROM stars WHERE msg=awarded.msg) DESC "
                                       "LIMIT 10", (ctx.guild.id,))])
@@ -126,26 +138,38 @@ class Starboard(commands.Cog):
                 for msg in messages),
             ))
 
-    @commands.hybrid_command(description="see a random starred message")
+    @commands.hybrid_command()
     async def random(self, ctx:commands.Context):
+        """see a random starred message"""
         msg_id,msg_ch_id = await self.db_fetchone(
             "SELECT msg,msg_ch FROM awarded WHERE guild=? ORDER BY random() LIMIT 1", (ctx.guild.id,))
         count, = await self.db_fetchone("SELECT count(*) FROM stars WHERE msg=?", (msg_id,))
-        await ctx.send(**await self.build_message(count, await self.partial_msg(msg_ch_id,msg_id).fetch()))
+        await ctx.send(**await self.build_message(count, await self.fetch_msg(msg_ch_id,msg_id)))
 
     @commands.command(description="show a certain starred message")
     async def show(self, ctx:commands.Context, msg:discord.Message|None):
+        """show a certain starred message
+        :param msg: the message to show. may be given as a reply, or as an ID if in the same channel, or as a jump link.
+        """
         match msg, ctx.message.reference:
             case None, None: raise commands.MissingRequiredArgument("msg")
             case None, ref:  msg = await self.resolve_ref(ref)
         count, = await self.db_fetchone("SELECT count(*) FROM stars WHERE msg=?", (msg.id,))
         await ctx.send(**await self.build_message(count, msg))
 
-    @app_commands.command(description="change configuration like msg_sb channel or min stars")
-    @app_commands.rename(sb="starboard-channel", minimum="minimum-star-count", timeout_d="timeout-in-days")
+    @app_commands.command()
+    @app_commands.rename(sb="starboard-channel", minimum="minimum-stars", timeout_d="timeout")
     @app_commands.default_permissions(manage_channels=True)
     async def starconfig(self, c:discord.Interaction,
                          sb:discord.TextChannel|None=None, minimum:int|None=None, timeout_d:int|None=None):
+        """change starboard configuration like starboard channel or minimum stars.
+        if no arguments are given, shows the current configuration.
+        if not all arguments are given, the rest will not be modified.
+        
+        :param sb: the starboard channel to set. required if configuring for the first time.
+        :param minimum: the minimum star count to reach starboard.
+        :param timeout: timeout period in days. after this period, messages cannot be added to or removed from the starboard.
+        """
         if sb is None and minimum is None and timeout_d is None:
             match await self.db_fetchone("SELECT minimum,sb,timeout FROM guilds WHERE guild=?", (c.guild_id,)):
                 case minimum,sb_id,None:
@@ -179,6 +203,9 @@ class Starboard(commands.Cog):
     @commands.command()
     @commands.has_permissions(manage_channels=True)
     async def import_rdanny(self, ctx:commands.Context, sb:discord.TextChannel):
+        """imports messages from an R. Danny starboard channel.
+        :param sb: the starboard channel in question
+        """
         scanned = 0
         mismatches:list[discord.Message] = []
         unparsable:list[discord.Message] = []
@@ -187,13 +214,13 @@ class Starboard(commands.Cog):
             if not (m := re.fullmatch(r".(?: \*\*(\d+)\*\*)? <#(\d+)> ID: (\d+)", msg_sb.content)):
                 unparsable.append(msg_sb)
                 continue
-            count, msg_ch_id, msg_id = int(m[1] or "1"), int(m[2]), int(m[3])
-            msg:discord.Message = await self.partial_msg(msg_ch_id,msg_id).fetch()
+            count,msg_ch_id,msg_id = int(m[1] or "1"), int(m[2]), int(m[3])
+            msg:discord.Message = await self.fetch_msg(msg_ch_id,msg_id)
             cnt_before = self.db.total_changes
             # get original stars
             if (stars := discord.utils.get(msg.reactions, emoji="⭐")):
                 async for starrer in stars.users():
-                    if starrer.id == msg.author.id: continue
+                    if starrer.id == msg.author.id: continue  # cheeky self-star
                     await self.db.execute("INSERT OR IGNORE INTO stars(starrer,msg,guild,medium) VALUES(?,?,?,0)",
                         (starrer.id,msg_id,ctx.guild.id))
             # get msg_sb stars
@@ -202,7 +229,7 @@ class Starboard(commands.Cog):
                     if starrer == msg.author.id: continue
                     await self.db.execute("INSERT OR IGNORE INTO stars(starrer,msg,guild,medium) VALUES(?,?,?,1)",
                         (starrer.id,msg_id,ctx.guild.id))
-            # ignore stars added by command (who even does that?)
+            # ignore stars added by command (hopefully no one did that)
             cnt_computed = self.db.total_changes - cnt_before
             if cnt_computed != count: mismatches.append(msg_sb)
             # add awarded
@@ -211,9 +238,22 @@ class Starboard(commands.Cog):
             scanned += 1
         await self.db.commit()
         await ctx.send(f"{scanned} messages added" +
-            '\nstar count mismatches: '       *(len(mismatches)!=0) + ', '.join(i.jump_url for i in mismatches) +
+            '\nstar count mismatches: '       *(len(mismatches)!=0) + ", ".join(i.jump_url for i in mismatches) +
             "\nmessages i didn't understand: "*(len(unparsable)!=0) + ", ".join(i.jump_url for i in unparsable) +
             "\nnow you need to unconfigure r.danny and configure asteroid, i think")
+
+    ### STARRING
+    # can work with reactions (`on_raw_reaction_{add,remove}`, "raw" in case someone stars older messages)
+    #     or the pop up menu (`{,un}star_menu`, added in `__main__`).
+    # these are quite different.interactions and reaction events and command contexts (if i want to add those later)
+    #     all have slightly different interfaces to get the different IDs (the info we actually want),
+    #     and raw reaction events give only a channel/message ID, but menus give you the full message already.
+    # so these four↓ functions actually do nothing except glue together `get_guild_info`, `find_msg` and
+    #     `{add,remove}_star` that do the actual work. we pass around the data in a big dict `r` because it looks nicer
+    #     (i think), and we use the same variable names as the db with an occasional `_id` added to the end 
+    # note that we delay the ms fetching until we know the star went through, as we only need it to post the message in
+    #     the starboard. we also don't use the message cache explicitly because there seems to not be an easy way to do
+    #     it and also LyricLy called it "uselesscore"
 
     @commands.Cog.listener()
     async def on_raw_reaction_add(self, ev:discord.RawReactionActionEvent):
@@ -249,15 +289,18 @@ class Starboard(commands.Cog):
             case minimum,sb_id,timeout_d:
                 return {"minimum":minimum, "sb_id":sb_id, "timeout_d":timeout_d, "guild_id":guild_id}
 
+    # if the message was a starboard message, we want to star the original instead.
+    # this sets medium to 1 if this happened. the menu functions ignore this, overriding it with medium=2, because we
+    #     don't need to keep track where the user right clicked.
     async def find_msg(self, minimum:int, sb_id:int, msg_id:int, msg_ch_id:int, guild_id:int,
-                       msg:discord.Message|None=None, **_) -> dict:
-        medium = 1
+                       msg:discord.Message|None=None) -> dict:  # <- useless type annotation 
+        medium = 0
         if msg_ch_id == sb_id:
             try:
                 msg_id,msg_ch_id = await self.db_fetchone("SELECT msg,msg_ch FROM awarded WHERE msg_sb=?", (msg_id,))
                 medium = 1
-                msg = None
-            except TypeError: pass  # message in starboard but not managed by this bot. i'll allow it
+                msg = None  # the message from the menu is NO LONGER the right message
+            except TypeError: pass  # message in starboard but not managed by this bot. i'll allow starring it
         return {"msg_id":msg_id, "msg_ch_id":msg_ch_id, "medium":medium, "msg":msg}
     
     async def add_star(self, minimum:int, sb_id:int, timeout_d:int|None, msg_id:int, msg_ch_id:int, guild_id:int,
@@ -269,7 +312,7 @@ class Starboard(commands.Cog):
         if count<minimum:
             await self.db.commit()  # make sure to commit to add the star
             return True
-        msg = msg or await self.partial_msg(msg_ch_id,msg_id).fetch()
+        msg = msg or await self.fetch_msg(msg_ch_id,msg_id)
         match await self.db_fetchone("SELECT msg_sb FROM awarded WHERE msg=?", (msg_id,)):
             case msg_sb_id,:  # already in starboard, edit the message
                 try: await self.partial_msg(sb_id,msg_sb_id).edit(**await self.build_message(count, msg))
@@ -283,9 +326,8 @@ class Starboard(commands.Cog):
         return True
     
     async def remove_star(self, minimum:int, sb_id:int, timeout_d:int|None, msg_id:int, msg_ch_id:int, guild_id:int,
-                          user_id:int, medium:int, msg:discord.Message|None=None
-                         ) -> bool:
-        dlt = await self.db.execute("DELETE FROM stars WHERE starrer=? AND msg=? AND medium=?", (user_id, msg_id, medium))
+                          user_id:int, medium:int, msg:discord.Message|None=None) -> bool:
+        dlt = await self.db.execute("DELETE FROM stars WHERE starrer=? AND msg=? AND medium=?", (user_id,msg_id,medium))
         if dlt.rowcount == 0:
             return False # don't bother continuing if the star wasn't recorded or in a different medium
         count, = await self.db_fetchone("SELECT count(*) FROM stars WHERE msg=?", (msg_id,))
@@ -293,7 +335,7 @@ class Starboard(commands.Cog):
             match await self.db_fetchone("DELETE FROM awarded WHERE msg=? RETURNING msg_sb", (msg_id,)):
                 case msg_sb_id,: await self.partial_msg(sb_id,msg_sb_id).delete()
         else:  # unstarred, but the message can stay in starboard
-            msg = msg or await self.partial_msg(msg_ch_id,msg_id).fetch()
+            msg = msg or await self.fetch_msg(msg_ch_id,msg_id)
             match await self.db_fetchone("SELECT msg_sb FROM awarded WHERE msg=?", (msg_id,)):
                 case msg_sb_id,:
                     try: await self.partial_msg(sb_id,msg_sb_id).edit(**await self.build_message(count, msg))
