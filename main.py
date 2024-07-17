@@ -9,7 +9,7 @@ discord.utils.setup_logging(level=logging.DEBUG)
 
 intents=discord.Intents().default()
 intents.message_content=True
-bot=commands.Bot(intents=intents, command_prefix=commands.when_mentioned_or("*"))
+bot=commands.Bot(intents=intents, command_prefix=commands.when_mentioned_or("*", "\\*"))
 
 @bot.event
 async def on_message(msg:discord.Message):

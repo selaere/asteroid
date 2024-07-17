@@ -233,7 +233,7 @@ class Starboard(commands.Cog):
     async def top(self, ctx:commands.Context):
         """see the top starred messages in the current guild."""
         async with ctx.typing():
-            messages = await asyncio.gather(*[self.fetch_msg async for msg,msg_ch in
+            messages = await asyncio.gather(*[self.fetch_msg(msg_ch,msg) async for msg,msg_ch in
                 await self.db.execute("SELECT msg,msg_ch FROM awarded WHERE guild=? "
                                       "ORDER BY (SELECT count(*) FROM stars WHERE msg=awarded.msg) DESC "
                                       "LIMIT 10", (ctx.guild.id,))])
@@ -342,7 +342,7 @@ class Starboard(commands.Cog):
             if cnt_computed != count: mismatches.append(msg_sb)
             # add awarded
             await self.db.execute("INSERT OR IGNORE INTO awarded(msg,msg_sb,msg_ch,guild,author) VALUES(?,?,?,?,?)",
-                                    (msg_id, msg_sb.id, msg_ch_id, ctx.guild.id, msg.author.id))
+                                  (msg_id, msg_sb.id, msg_ch_id, ctx.guild.id, msg.author.id))
             scanned += 1
         await self.db.commit()
         await ctx.send(f"{scanned} messages added" +
@@ -351,7 +351,7 @@ class Starboard(commands.Cog):
             "\nnow you need to unconfigure r.danny and configure asteroid, i think")
     
     ### ERRORS
-    
+
     @commands.Cog.listener()
     async def on_command_error(self, ctx:commands.Context, exc:Exception) -> None:
         if isinstance(exc, commands.MissingRequiredArgument):                  await ctx.send("can you elaborate")
@@ -360,7 +360,7 @@ class Starboard(commands.Cog):
         elif isinstance(exc, (commands.MissingPermissions,commands.NotOwner)): await ctx.send("wrong alt. bozo")
         else:
             await ctx.send(f"{exc} :(")
-            logging.exception(":(")
+            logging.exception(":(", exc_info=exc)
 
 async def setup(bot):
     await bot.db.executescript(SCHEMA)
