@@ -111,8 +111,8 @@ class Starboard(commands.Cog):
     # these are quite different.interactions and reaction events and command contexts (if i want to add those later)
     #     all have slightly different interfaces to get the different IDs (the info we actually want),
     #     and raw reaction events give only a channel/message ID, but menus give you the full message already.
-    # so these four↓ functions actually do nothing except glue together `get_guild_info`, `find_msg` and
-    #     `{add,remove}_star` that do the actual work. we pass around the data in a big dict `r` because it looks nicer
+    # so these four↓ functions don't do much other than glue together `get_guild_info`, `find_msg` and
+    #     `{add,remove}_star`, that do the actual work. we pass around the data in a big dict `r` because it looks nicer
     #     (i think), and we use the same variable names as the db with an occasional `_id` added to the end 
     # note that we delay the ms fetching until we know the star went through, as we only need it to post the message in
     #     the starboard. we also don't use the message cache explicitly because there seems to not be an easy way to do
@@ -144,7 +144,15 @@ class Starboard(commands.Cog):
         r  = await self.get_guild_info(c.guild_id)
         r |= await self.find_msg(msg_id=msg.id, msg_ch_id=msg.channel.id, msg=msg, **r) | {"medium":2}
         success = await self.remove_star(user_id=c.user.id, **r)
-        await ephemeral(c, "ok" if success else "couldn't remove star")
+        if success:
+            txt = "ok"
+        else:
+            match await self.db_fetchone("SELECT medium FROM stars WHERE starrer=? AND msg=?", (c.user.id,r["msg_id"])):
+                case None: txt = "you haven't starred that yet, bozo!"
+                case 0,:   txt = "you already reacted with a ⭐ to this message. remove this reaction to proceed."
+                case 1,:   txt = ("you already reacted with a ⭐ to the message in the starboard. remove this reaction"
+                                  " to proceed.")
+        await ephemeral(c, txt)
 
     async def get_guild_info(self, guild_id:int) -> dict:
         match await self.db_fetchone("SELECT minimum,sb,timeout FROM guilds WHERE guild=?", (guild_id,)):
@@ -156,7 +164,7 @@ class Starboard(commands.Cog):
     # this sets medium to 1 if this happened. the menu functions ignore this, overriding it with medium=2, because we
     #     don't need to keep track where the user right clicked.
     async def find_msg(self, minimum:int, sb_id:int, msg_id:int, msg_ch_id:int, guild_id:int,
-                       msg:discord.Message|None=None) -> dict:  # <- useless type annotation 
+                       msg:discord.Message|None=None, **_) -> dict:  # <- useless type annotation 
         medium = 0
         if msg_ch_id == sb_id:
             try:
@@ -219,15 +227,15 @@ class Starboard(commands.Cog):
         """see some server-specific statistics for starboard."""
         total_stars,starred_messages = await self.db_fetchone(
             "SELECT count(*),count(DISTINCT msg) FROM stars WHERE guild=?", (ctx.guild.id,))
-        msg = f"Hi, i am asteroid ^_^\nI have seen {total_stars} stars and {starred_messages} starred messages.\n"
+        txt = f"Hi, i am asteroid ^_^\nI have seen {total_stars} stars and {starred_messages} starred messages.\n"
         match await self.db_fetchone("SELECT minimum,sb FROM guilds WHERE guild=?", (ctx.guild.id,)):
             case minimum,sb_id:
                 awarded_messages,= await self.db_fetchone("SELECT count(*) FROM awarded WHERE guild=?", (ctx.guild.id,))
-                msg += (f"When messages reach {minimum} ⭐, they will be resent to <#{sb_id}>. "
+                txt += (f"When messages reach {minimum} ⭐, they will be resent to <#{sb_id}>. "
                         f"Right now there are {awarded_messages} messages there.")
             case None:
-                msg += f"The starboard is toggled off right now."
-        await ctx.send(msg)
+                txt += f"The starboard is toggled off right now."
+        await ctx.send(txt)
 
     @commands.hybrid_command()
     async def top(self, ctx:commands.Context):
@@ -276,7 +284,8 @@ class Starboard(commands.Cog):
         
         :param sb: the starboard channel to set. required if configuring for the first time.
         :param minimum: the minimum star count to reach starboard.
-        :param timeout: timeout period in days. after this period, messages cannot be added to or removed from the starboard.
+        :param timeout_d: timeout period in days. after this period, messages cannot be added to or removed
+            from the starboard.
         """
         if sb is None and minimum is None and timeout_d is None:
             match await self.db_fetchone("SELECT minimum,sb,timeout FROM guilds WHERE guild=?", (c.guild_id,)):
