@@ -160,6 +160,21 @@ class Starboard(commands.Cog):
             case minimum,sb_id,timeout_d:
                 return {"minimum":minimum, "sb_id":sb_id, "timeout_d":timeout_d, "guild_id":guild_id}
 
+    async def forget_message(self, msg_id:int, **r):
+        if (await self.db.execute("DELETE FROM stars WHERE msg=?", (msg_id,))).rowcount != 0:
+            await self.unaward(msg_id, **r)
+    
+    # does nothing if the message wasn't awarded
+    async def unaward(self, msg_id:int, sb_id:int|None=None, **_):
+        match await self.db.execute("DELETE FROM awarded WHERE msg=? RETURNING msg_sb,guild", (msg_id,)):
+            case msg_sb_id, guild_id:
+                try:
+                    if sb_id is not None:
+                        sb_id = await self.db_fetchone("SELECT sb FROM guilds WHERE guild=?", (guild_id,))
+                    # huh. this is problematic if sb changes
+                    await self.partial_msg(sb_id,msg_sb_id).delete()
+                except discord.Forbidden: pass
+
     # if the message was a starboard message, we want to star the original instead.
     # this sets medium to 1 if this happened. the menu functions ignore this, overriding it with medium=2, because we
     #     don't need to keep track where the user right clicked.
@@ -180,19 +195,17 @@ class Starboard(commands.Cog):
                                   (user_id,msg_id,guild_id,medium))).rowcount == 0:
             return False  # if the star was there already (when above query fails uniqueness constraint)
         count, = await self.db_fetchone("SELECT count(*) FROM stars WHERE msg=?", (msg_id,))
-        if count<minimum:
-            await self.db.commit()  # make sure to commit to add the star
-            return True
-        msg = msg or await self.fetch_msg(msg_ch_id,msg_id)
-        match await self.db_fetchone("SELECT msg_sb FROM awarded WHERE msg=?", (msg_id,)):
-            case msg_sb_id,:  # already in starboard, edit the message
-                try: await self.partial_msg(sb_id,msg_sb_id).edit(**await self.build_message(count, msg))
-                except discord.Forbidden: pass  # if the message was deleted, or on migration
-            case None if on_time(msg_id,timeout_d):
-                # not in starboard yet (usually bc count==minimum, or minimum was higher back then)
-                msg_sb = await self.bot.get_channel(sb_id).send(**await self.build_message(count, msg))
-                await self.db.execute("INSERT INTO awarded(msg,msg_sb,msg_ch,guild,author) VALUES(?,?,?,?,?)",
-                                      (msg_id, msg_sb.id, msg_ch_id, guild_id, msg.author.id))
+        if count >= minimum:
+            msg = msg or await self.fetch_msg(msg_ch_id,msg_id)
+            match await self.db_fetchone("SELECT msg_sb FROM awarded WHERE msg=?", (msg_id,)):
+                case msg_sb_id,:  # already in starboard, edit the message
+                    try: await self.partial_msg(sb_id,msg_sb_id).edit(**await self.build_message(count, msg))
+                    except discord.Forbidden: pass  # if the message was deleted, or on migration
+                case None if on_time(msg_id,timeout_d):
+                    # not in starboard yet (usually bc count==minimum, or minimum was higher back then)
+                    msg_sb = await self.bot.get_channel(sb_id).send(**await self.build_message(count, msg))
+                    await self.db.execute("INSERT INTO awarded(msg,msg_sb,msg_ch,guild,author) VALUES(?,?,?,?,?)",
+                                        (msg_id, msg_sb.id, msg_ch_id, guild_id, msg.author.id))
         await self.db.commit()
         return True
     
@@ -203,8 +216,7 @@ class Starboard(commands.Cog):
             return False # don't bother continuing if the star wasn't recorded or in a different medium
         count, = await self.db_fetchone("SELECT count(*) FROM stars WHERE msg=?", (msg_id,))
         if count<minimum and on_time(msg_id,timeout_d):  # message unawarded, or it wasn't awarded to begin with
-            match await self.db_fetchone("DELETE FROM awarded WHERE msg=? RETURNING msg_sb", (msg_id,)):
-                case msg_sb_id,: await self.partial_msg(sb_id,msg_sb_id).delete()
+            await self.unaward(msg_id,sb_id)
         else:  # unstarred, but the message can stay in starboard
             msg = msg or await self.fetch_msg(msg_ch_id,msg_id)
             match await self.db_fetchone("SELECT msg_sb FROM awarded WHERE msg=?", (msg_id,)):
@@ -219,6 +231,16 @@ class Starboard(commands.Cog):
                                           (msg_id, msg_sb.id, msg_ch_id, guild_id, msg.author.id))
         await self.db.commit()
         return True
+
+    @commands.Cog.listener()
+    async def on_raw_message_delete(self, ev:discord.RawMessageDeleteEvent):
+        await self.forget_message(ev.message_id)
+
+    @commands.Cog.listener()
+    async def on_raw_bulk_message_delete(self, ev:discord.RawBulkMessageDeleteEvent):
+        r = await self.get_guild_info(ev.guild_id)
+        for msg_id in ev.message_ids:
+            await self.forget_message(msg_id, r["sb_id"])
 
     ### COMMANDS
 
@@ -240,18 +262,24 @@ class Starboard(commands.Cog):
     @commands.hybrid_command()
     async def top(self, ctx:commands.Context):
         """see the top starred messages in the current guild."""
+        async def query(msg_ch_id,msg_id):
+            try:
+                return await self.fetch_msg(msg_ch_id,msg_id)
+            except discord.NotFound:
+                await self.forget_message(msg_id)
+                return None
         async with ctx.typing():
-            messages = await asyncio.gather(*[self.fetch_msg(msg_ch,msg) async for msg,msg_ch in
-                await self.db.execute("SELECT msg,msg_ch FROM awarded WHERE guild=? "
+            messages = await asyncio.gather(*[query(msg_ch_id,msg_id) async for msg_ch_id,msg_id in
+                await self.db.execute("SELECT msg_ch,msg FROM awarded WHERE guild=? "
                                       "ORDER BY (SELECT count(*) FROM stars WHERE msg=awarded.msg) DESC "
                                       "LIMIT 10", (ctx.guild.id,))])
             def shorten(x:str) -> str: return x[:400] + (x[400:] and "…")
             await ctx.send(allowed_mentions=discord.AllowedMentions.none(),embed=discord.Embed(
                 title="Top Messages in Starboard",
                 colour=discord.Colour.from_rgb(255,255,127),
-                description="\n".join(shorten(
-                    f"1. {msg.jump_url} **{msg.author.display_name}**: " + short_disp(msg, escape=True))
-                for msg in messages),
+                description="\n".join(
+                    shorten(f"1. {msg.jump_url} **{msg.author.display_name}**: " + short_disp(msg, escape=True))
+                for msg in messages if msg),
             ))
 
     @commands.hybrid_command()
