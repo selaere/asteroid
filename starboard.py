@@ -83,11 +83,22 @@ class Starboard(commands.Cog):
     async def fetch_msg(self, channel:int, id:int) -> discord.Message:
         return await self.bot.get_channel(channel).fetch_message(id)
     
+    # only intended for starred messages, to handle message disappearance. but it will do nothing to other messages
+    async def fetch_msg_opt(self,msg_ch_id:int,msg_id:int):
+        try:
+            return await self.fetch_msg(msg_ch_id,msg_id)
+        except (discord.NotFound, discord.Forbidden, AttributeError):
+            await self.forget_message(msg_id)
+            return None
+
     async def db_fetchone(self, sql, parameters) -> tuple|None:  # avoids annoying double await
         return await (await self.db.execute(sql, parameters)).fetchone()
 
-    async def resolve_ref(self, ref:discord.MessageReference) -> discord.Message:
-        return ref.cached_message or await self.fetch_msg(ref.channel_id,ref.message_id)
+    async def resolve_ref(self, ref:discord.MessageReference) -> discord.Message|None:
+        try:
+            return ref.cached_message or await self.fetch_msg(ref.channel_id,ref.message_id)
+        except (discord.NotFound, discord.Forbidden, AttributeError):
+            return None
     
     # builds a message for starboard. given in this funny way so it can be unpacked into edit/send
     async def build_message(self, count:int, msg:discord.Message) -> dict:
@@ -97,12 +108,12 @@ class Starboard(commands.Cog):
         if att_no>1: embed.set_footer(text=f"{att_no-1} attachment{'s are' if att_no!=2 else ' is'} not being shown")
         embed.set_author(name=msg.author.display_name, icon_url=msg.author.display_avatar.url)
         if msg.reference is not None:
-            try: reply = await self.resolve_ref(msg.reference)
-            except (discord.NotFound, discord.Forbidden): embed.add_field(name="replying to some message",value="sorry")
-            else:
-                embed.add_field(name=f"replying to {reply.author.display_name}", value=short_disp(reply), inline=False)
-                if att_no==0 and len(reply.attachments)>0:
-                    embed.set_image(url=reply.attachments[0].url).set_footer(text="attachment shown is from reply")
+            match await self.resolve_ref(msg.reference):
+                case None: embed.add_field(name="replying to some message",value="sorry")
+                case msg:
+                    embed.add_field(name=f"replying to {reply.author.display_name}", value=short_disp(reply), inline=False)
+                    if att_no==0 and len(reply.attachments)>0:
+                        embed.set_image(url=reply.attachments[0].url).set_footer(text="attachment shown is from reply")
         return { "content":"⭐🌟💫🤩🌌"[min(4,count//5)]+" "+msg.jump_url, "embed":embed }
 
     ### STARRING
@@ -166,11 +177,11 @@ class Starboard(commands.Cog):
     
     # does nothing if the message wasn't awarded
     async def unaward(self, msg_id:int, sb_id:int|None=None, **_):
-        match await self.db.execute("DELETE FROM awarded WHERE msg=? RETURNING msg_sb,guild", (msg_id,)):
+        match await self.db_fetchone("DELETE FROM awarded WHERE msg=? RETURNING msg_sb,guild", (msg_id,)):
             case msg_sb_id, guild_id:
                 try:
                     if sb_id is not None:
-                        sb_id = await self.db_fetchone("SELECT sb FROM guilds WHERE guild=?", (guild_id,))
+                        sb_id, = await self.db_fetchone("SELECT sb FROM guilds WHERE guild=?", (guild_id,))
                     # huh. this is problematic if sb changes
                     await self.partial_msg(sb_id,msg_sb_id).delete()
                 except discord.Forbidden: pass
@@ -196,7 +207,8 @@ class Starboard(commands.Cog):
             return False  # if the star was there already (when above query fails uniqueness constraint)
         count, = await self.db_fetchone("SELECT count(*) FROM stars WHERE msg=?", (msg_id,))
         if count >= minimum:
-            msg = msg or await self.fetch_msg(msg_ch_id,msg_id)
+            msg = msg or await self.fetch_msg_opt(msg_ch_id,msg_id)
+            if msg is None: return True
             match await self.db_fetchone("SELECT msg_sb FROM awarded WHERE msg=?", (msg_id,)):
                 case msg_sb_id,:  # already in starboard, edit the message
                     try: await self.partial_msg(sb_id,msg_sb_id).edit(**await self.build_message(count, msg))
@@ -218,7 +230,8 @@ class Starboard(commands.Cog):
         if count<minimum and on_time(msg_id,timeout_d):  # message unawarded, or it wasn't awarded to begin with
             await self.unaward(msg_id,sb_id)
         else:  # unstarred, but the message can stay in starboard
-            msg = msg or await self.fetch_msg(msg_ch_id,msg_id)
+            msg = msg or await self.fetch_msg_opt(msg_ch_id,msg_id)
+            if msg is None: return True
             match await self.db_fetchone("SELECT msg_sb FROM awarded WHERE msg=?", (msg_id,)):
                 case msg_sb_id,:
                     try: await self.partial_msg(sb_id,msg_sb_id).edit(**await self.build_message(count, msg))
@@ -262,14 +275,8 @@ class Starboard(commands.Cog):
     @commands.hybrid_command()
     async def top(self, ctx:commands.Context):
         """see the top starred messages in the current guild."""
-        async def query(msg_ch_id,msg_id):
-            try:
-                return await self.fetch_msg(msg_ch_id,msg_id)
-            except discord.NotFound:
-                await self.forget_message(msg_id)
-                return None
         async with ctx.typing():
-            messages = await asyncio.gather(*[query(msg_ch_id,msg_id) async for msg_ch_id,msg_id in
+            messages = await asyncio.gather(*[self.fetch_msg_opt(msg_ch_id,msg_id) async for msg_ch_id,msg_id in
                 await self.db.execute("SELECT msg_ch,msg FROM awarded WHERE guild=? "
                                       "ORDER BY (SELECT count(*) FROM stars WHERE msg=awarded.msg) DESC "
                                       "LIMIT 10", (ctx.guild.id,))])
@@ -297,7 +304,7 @@ class Starboard(commands.Cog):
         """
         match msg, ctx.message.reference:
             case None, None: return await ctx.send("can you elaborate")
-            case None, ref:  msg = await self.resolve_ref(ref)
+            case None, ref:  msg = await self.resolve_ref(ref)  # this COULD fail but realistically it won't
         count, = await self.db_fetchone("SELECT count(*) FROM stars WHERE msg=?", (msg.id,))
         await ctx.send(**await self.build_message(count, msg))
 
