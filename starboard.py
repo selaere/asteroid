@@ -84,7 +84,7 @@ class Starboard(commands.Cog):
         return await self.bot.get_channel(channel).fetch_message(id)
     
     # only intended for starred messages, to handle message disappearance. but it will do nothing to other messages
-    async def fetch_msg_opt(self,msg_ch_id:int,msg_id:int):
+    async def fetch_msg_opt(self, msg_ch_id:int, msg_id:int):
         try:
             return await self.fetch_msg(msg_ch_id,msg_id)
         except (discord.NotFound, discord.Forbidden, AttributeError):
@@ -99,6 +99,12 @@ class Starboard(commands.Cog):
             return ref.cached_message or await self.fetch_msg(ref.channel_id,ref.message_id)
         except (discord.NotFound, discord.Forbidden, AttributeError):
             return None
+
+    async def channel_allowed(self, msg:discord.Message) -> bool:
+        ch = msg.channel
+        if isinstance(ch, discord.Thread):
+            ch = msg.parent
+        return bool(re.search(r"\bcw\b", ch.name))
     
     # builds a message for starboard. given in this funny way so it can be unpacked into edit/send
     async def build_message(self, count:int, msg:discord.Message) -> dict:
@@ -208,7 +214,7 @@ class Starboard(commands.Cog):
         count, = await self.db_fetchone("SELECT count(*) FROM stars WHERE msg=?", (msg_id,))
         if count >= minimum:
             msg = msg or await self.fetch_msg_opt(msg_ch_id,msg_id)
-            if msg is None: return True
+            if msg is None and channel_allowed(msg): return True
             match await self.db_fetchone("SELECT msg_sb FROM awarded WHERE msg=?", (msg_id,)):
                 case msg_sb_id,:  # already in starboard, edit the message
                     try: await self.partial_msg(sb_id,msg_sb_id).edit(**await self.build_message(count, msg))
@@ -255,7 +261,7 @@ class Starboard(commands.Cog):
         for msg_id in ev.message_ids:
             await self.forget_message(msg_id, r["sb_id"])
 
-    ### COMMANDS
+    ### USER COMMANDS
 
     @commands.hybrid_command()
     async def info(self, ctx:commands.Context):
@@ -308,6 +314,20 @@ class Starboard(commands.Cog):
         count, = await self.db_fetchone("SELECT count(*) FROM stars WHERE msg=?", (msg.id,))
         await ctx.send(**await self.build_message(count, msg))
 
+    ### ADMIN COMMANDS
+
+    async def printout(self, guild_id):  # brief output of all the settings if no args are given
+        match await self.db_fetchone("SELECT minimum,sb,timeout FROM guilds WHERE guild=?", (guild_id,)):
+            case minimum, sb_id, None:
+                msg = f"minimum stars: {minimum}\nstarboard channel: <#{sb_id}>\ntimeout: never"
+            case minimum, sb_id, timeout_d:
+                msg = f"minimum stars: {minimum}\nstarboard channel: <#{sb_id}>\ntimeout: {timeout_d} days"
+            case None:
+                msg = "unconfigured"
+        return msg
+
+    # here we provide a slash command and a text command with slightly different APIs. todo remove some redundancy
+
     @app_commands.command()
     @app_commands.rename(sb="starboard-channel", minimum="minimum-stars", timeout_d="timeout")
     @app_commands.default_permissions(manage_channels=True)
@@ -323,16 +343,9 @@ class Starboard(commands.Cog):
             from the starboard.
         """
         if sb is None and minimum is None and timeout_d is None:
-            match await self.db_fetchone("SELECT minimum,sb,timeout FROM guilds WHERE guild=?", (c.guild_id,)):
-                case minimum,sb_id,None:
-                    msg = f"minimum stars: {minimum}\nstarboard channel: <#{sb_id}>\ntimeout: never"
-                case minimum,sb_id,timeout_d:
-                    msg = f"minimum stars: {minimum}\nstarboard channel: <#{sb_id}>\ntimeout: {timeout_d} days"
-                case None:
-                    msg = "unconfigured"
-            return await ephemeral(c, msg)
+            return await ephemeral(c, await self.printout(c.guild_id))
         else:
-            if sb is not None:  # do this first in case minimum isn't set, bc that has a minimum value
+            if sb is not None:  # do this first in case minimum/timeout isn't set, bc that has a minimum value
                 if sb.guild != c.guild: return await ephemeral(c,"eat bricks")
                 cur = await self.db.execute("INSERT OR REPLACE INTO guilds(guild,sb) VALUES(?,?)", (c.guild_id, sb.id))
             if minimum is not None:
@@ -352,6 +365,51 @@ class Starboard(commands.Cog):
         await ephemeral(c, "ok")
         await self.db.commit()
     
+    @commands.command()
+    @commands.has_permissions(manage_channels=True)
+    async def starconfig(self, ctx:commands.Context, *args):
+        """change starboard configuration like starboard channel or minimum stars.
+        
+        USAGE: *starconfig [starboard <channel>] [minimum <minimum starcount>] [timeout <days>]
+
+        if no arguments are given, shows the current configuration.
+        if not all arguments are given, the rest will not be modified.
+        
+        starboard: the starboard channel to set. required if configuring for the first time.
+        minimum: the minimum star count to reach starboard.
+        timeout: timeout period in days. after this period, messages cannot be added to or removed from the starboard.
+        """
+        args = [*args]
+        if len(args) == 0:
+            return await ctx.send(await self.printout(ctx.guild.id))
+        while len(args) > 0:
+            match args.pop(0):
+                case "sb" | "starboard" | "starboard-channel":
+                    sb = await commands.TextChannelConverter().convert(ctx, args.pop(0))
+                    if sb.guild != ctx.guild: return await ctx.send("eat bricks")
+                    cur = await self.db.execute("INSERT OR REPLACE INTO guilds(guild,sb) VALUES(?,?)", (ctx.guild.id, sb.id))
+                case "minimum":
+                    try: minimum = int(args.pop(0))
+                    except TypeError: return await ctx.send("eat bricks")
+                    cur = await self.db.execute("UPDATE guilds SET minimum=? WHERE guild=?", (minimum, ctx.guild.id))
+                    if cur.rowcount==0:
+                        await self.db.rollback()
+                        return await ctx.send("no starboard channel set")
+                case "timeout":
+                    try: timeout_d = int(args.pop(0))
+                    except TypeError: return await ctx.send("eat bricks")
+                    if timeout_d == 0: timeout_d = None
+                    elif timeout_d < 0: return await ephemeral(c,"eat bricks")
+                    cur = await self.db.execute("UPDATE guilds SET timeout=? WHERE guild=?", (timeout_d, ctx.guild.id))
+                    if cur.rowcount==0:
+                        await self.db.rollback()
+                        return await ctx.send("no starboard channel set")
+                case x:
+                    await self.db.rollback()
+                    return await ctx.send(f"wtf is a {x}")
+        await ctx.send("ok")
+        await self.db.commit()
+
     @commands.command()
     @commands.has_permissions(manage_channels=True)
     async def import_rdanny(self, ctx:commands.Context, sb:discord.TextChannel):
