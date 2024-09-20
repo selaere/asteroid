@@ -12,11 +12,6 @@ intents.message_content=True
 bot=commands.Bot(intents=intents, command_prefix=commands.when_mentioned_or("*", "\\*"))
 
 @bot.event
-async def on_message(msg:discord.Message):
-    msg.content=="sussy" and await msg.channel.send("baka")
-    await bot.process_commands(msg)
-
-@bot.event
 async def on_ready():
     print("i'm in "+", ".join(x.name for x in bot.guilds))
 

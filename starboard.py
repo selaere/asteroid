@@ -6,6 +6,9 @@
 #  0. reacting to the original message (msg)
 #  1. reacting to the message in the starboard (msg_sb) once it has been awarded
 #  2. using a context menu on the message (msg) or starboard (msg_sb)
+FROM_REACT = 0
+FROM_REACT_SB = 1
+FROM_MENU = 2
 # this means we have to make sure every user can't star any message more than once (hence the UNIQUE(starrer,msg) below)
 # also, to not get strange behaviour like fake stars or double counts, when a star is removed, it has to be removed in
 #   the same medium as it was added.
@@ -25,7 +28,7 @@ CREATE TABLE IF NOT EXISTS awarded(
     msg_ch  INTEGER NOT NULL,        -- original message's channel
     msg_sb  INTEGER NOT NULL UNIQUE, -- message in starboard
     guild   INTEGER NOT NULL,
-    author  INTEGER NOT NULL
+    author  INTEGER NOT NULL         -- original message's author
 );
 CREATE TABLE IF NOT EXISTS stars(
     starrer INTEGER NOT NULL,
@@ -64,6 +67,10 @@ def short_disp(msg:discord.Message, escape=False) -> str:  # used for the *top m
            + " [sticker]"*len(msg.stickers)
            + " [poll]"*(msg.poll is not None)
            + " [edited]"*(msg.edited_at is not None))
+
+def msg_fields(msg: discord.Message) -> dict:
+    return { "msg_id":msg.id, "msg_ch_id":msg.channel.id, "author_id":msg.author.id, "msg":msg }
+
 class NotConfigured(Exception): pass
 
 class Starboard(commands.Cog):
@@ -100,11 +107,13 @@ class Starboard(commands.Cog):
         except (discord.NotFound, discord.Forbidden, AttributeError):
             return None
 
-    async def channel_allowed(self, msg:discord.Message) -> bool:
-        ch = msg.channel
+    def channel_allowed(self, ch_id:int) -> bool:
+        ch = self.bot.get_channel(ch_id)
+        logging.warn(repr(ch))
         if isinstance(ch, discord.Thread):
-            ch = msg.parent
-        return bool(re.search(r"\bcw\b", ch.name))
+            ch = ch.parent
+        logging.warn(repr(ch))
+        return re.search(r"\bcw\b", ch.name) is None
     
     # builds a message for starboard. given in this funny way so it can be unpacked into edit/send
     async def build_message(self, count:int, msg:discord.Message) -> dict:
@@ -139,36 +148,28 @@ class Starboard(commands.Cog):
     async def on_raw_reaction_add(self, ev:discord.RawReactionActionEvent):
         if ev.emoji.name != "⭐": return
         r  = await self.get_guild_info(ev.guild_id)
-        r |= await self.find_msg(msg_id=ev.message_id, msg_ch_id=ev.channel_id, **r)
-        if not await self.add_star(user_id=ev.user_id, **r):
-            # the star was added in a different medium. delete it and forget
+        r |= await self.find_msg(msg_id=ev.message_id, msg_ch_id=ev.channel_id, author_id=ev.message_author_id, **r)
+        if "ok" != await self.add_star(user_id=ev.user_id, **r):
+            # something happened. delete it and forget
             await self.partial_msg(ev.channel_id,ev.message_id).remove_reaction("⭐", discord.Object(ev.user_id))
 
     @commands.Cog.listener()
     async def on_raw_reaction_remove(self, ev:discord.RawReactionActionEvent):
         if ev.emoji.name != "⭐": return
         r  = await self.get_guild_info(ev.guild_id)
-        r |= await self.find_msg(msg_id=ev.message_id, msg_ch_id=ev.channel_id, **r)
+        r |= await self.find_msg(msg_id=ev.message_id, msg_ch_id=ev.channel_id, author_id=ev.message_author_id, **r)
         await self.remove_star(user_id=ev.user_id, **r)
     
     async def star_menu(self, c:discord.Interaction, msg:discord.Message):
         r  = await self.get_guild_info(c.guild_id)
-        r |= await self.find_msg(msg_id=msg.id, msg_ch_id=msg.channel.id, msg=msg, **r) | {"medium":2}
-        success = await self.add_star(user_id=c.user.id, **r)
-        await ephemeral(c, "ok" if success else "you already starred that, bozo!")
+        r |= await self.find_msg(**msg_fields(msg), **r) | {"medium":FROM_MENU}
+        txt = await self.add_star(user_id=c.user.id, **r)
+        await ephemeral(c, txt)
 
     async def unstar_menu(self, c:discord.Interaction, msg:discord.Message):
         r  = await self.get_guild_info(c.guild_id)
-        r |= await self.find_msg(msg_id=msg.id, msg_ch_id=msg.channel.id, msg=msg, **r) | {"medium":2}
-        success = await self.remove_star(user_id=c.user.id, **r)
-        if success:
-            txt = "ok"
-        else:
-            match await self.db_fetchone("SELECT medium FROM stars WHERE starrer=? AND msg=?", (c.user.id,r["msg_id"])):
-                case None: txt = "you haven't starred that yet, bozo!"
-                case 0,:   txt = "you already reacted with a ⭐ to this message. remove this reaction to proceed."
-                case 1,:   txt = ("you already reacted with a ⭐ to the message in the starboard. remove this reaction"
-                                  " to proceed.")
+        r |= await self.find_msg(**msg_fields(msg), **r) | {"medium":FROM_MENU}
+        txt = await self.remove_star(user_id=c.user.id, **r)
         await ephemeral(c, txt)
 
     async def get_guild_info(self, guild_id:int) -> dict:
@@ -193,28 +194,31 @@ class Starboard(commands.Cog):
                 except discord.Forbidden: pass
 
     # if the message was a starboard message, we want to star the original instead.
-    # this sets medium to 1 if this happened. the menu functions ignore this, overriding it with medium=2, because we
-    #     don't need to keep track where the user right clicked.
-    async def find_msg(self, minimum:int, sb_id:int, msg_id:int, msg_ch_id:int, guild_id:int,
+    # set medium to FROM_REACT_SB if this happened. the menu functions ignore this, overriding it with medium=FROM_MENU,
+    #   because we don't need to keep track where the user right clicked.
+    async def find_msg(self, minimum:int, sb_id:int, msg_id:int, msg_ch_id:int, guild_id:int, author_id:int,
                        msg:discord.Message|None=None, **_) -> dict:  # <- useless type annotation 
-        medium = 0
+        medium = FROM_REACT
         if msg_ch_id == sb_id:
             try:
-                msg_id,msg_ch_id = await self.db_fetchone("SELECT msg,msg_ch FROM awarded WHERE msg_sb=?", (msg_id,))
-                medium = 1
+                msg_id, msg_ch_id, author_id = await self.db_fetchone(
+                    "SELECT msg,msg_ch,author FROM awarded WHERE msg_sb=?", (msg_id,))
+                medium = FROM_REACT_SB
                 msg = None  # the message from the menu is NO LONGER the right message
             except TypeError: pass  # message in starboard but not managed by this bot. i'll allow starring it
-        return {"msg_id":msg_id, "msg_ch_id":msg_ch_id, "medium":medium, "msg":msg}
+        return {"msg_id":msg_id, "msg_ch_id":msg_ch_id, "author_id":author_id, "medium":medium, "msg":msg}
     
     async def add_star(self, minimum:int, sb_id:int, timeout_d:int|None, msg_id:int, msg_ch_id:int, guild_id:int,
-                       user_id:int, medium:int, msg:discord.Message|None=None) -> bool:
+                       author_id:int, user_id:int, medium:int, msg:discord.Message|None=None) -> str:
+        if user_id == author_id: return "rule 11"
+        if not self.channel_allowed(msg_ch_id): return "no starring in cw channels. sorry!"
         if (await self.db.execute("INSERT OR IGNORE INTO stars(starrer,msg,guild,medium) VALUES(?,?,?,?)",
-                                  (user_id,msg_id,guild_id,medium))).rowcount == 0:
-            return False  # if the star was there already (when above query fails uniqueness constraint)
+                                  (user_id,msg_id,guild_id,medium))).rowcount == 0:  # try to add star
+            return "you already starred that, bozo!"  # if the star was there already (when above query fails UNIQUE)
         count, = await self.db_fetchone("SELECT count(*) FROM stars WHERE msg=?", (msg_id,))
         if count >= minimum:
             msg = msg or await self.fetch_msg_opt(msg_ch_id,msg_id)
-            if msg is None and channel_allowed(msg): return True
+            if msg is None: return "this message never existed. no clue what you are talking about"
             match await self.db_fetchone("SELECT msg_sb FROM awarded WHERE msg=?", (msg_id,)):
                 case msg_sb_id,:  # already in starboard, edit the message
                     try: await self.partial_msg(sb_id,msg_sb_id).edit(**await self.build_message(count, msg))
@@ -225,16 +229,23 @@ class Starboard(commands.Cog):
                     await self.db.execute("INSERT INTO awarded(msg,msg_sb,msg_ch,guild,author) VALUES(?,?,?,?,?)",
                                         (msg_id, msg_sb.id, msg_ch_id, guild_id, msg.author.id))
         await self.db.commit()
-        return True
+        return "ok"
     
     async def remove_star(self, minimum:int, sb_id:int, timeout_d:int|None, msg_id:int, msg_ch_id:int, guild_id:int,
-                          user_id:int, medium:int, msg:discord.Message|None=None) -> bool:
+                          author_id:int, user_id:int, medium:int, msg:discord.Message|None=None) -> str:
         dlt = await self.db.execute("DELETE FROM stars WHERE starrer=? AND msg=? AND medium=?", (user_id,msg_id,medium))
         if dlt.rowcount == 0:
-            return False # don't bother continuing if the star wasn't recorded or in a different medium
+            # don't continue if the star wasn't recorded or in a different medium.
+            # the error message isn't used if this is called from a reaction_remove, but it's cheap and pretty unlikely
+            # (something has to get out of sync with the reactions)
+            match await self.db_fetchone("SELECT medium FROM stars WHERE starrer=? AND msg=?", (user_id,msg_id)):
+                case None: return "you haven't starred that yet, bozo!"
+                case 0,:   return "you already reacted with a ⭐ to this message. remove this reaction to proceed."
+                case 1,:   return ("you already reacted with a ⭐ to the message in the starboard. remove this reaction"
+                                   " to proceed.")
         count, = await self.db_fetchone("SELECT count(*) FROM stars WHERE msg=?", (msg_id,))
         if count<minimum and on_time(msg_id,timeout_d):  # message unawarded, or it wasn't awarded to begin with
-            await self.unaward(msg_id,sb_id)
+            await self.unaward(msg_id, sb_id)
         else:  # unstarred, but the message can stay in starboard
             msg = msg or await self.fetch_msg_opt(msg_ch_id,msg_id)
             if msg is None: return True
@@ -249,7 +260,7 @@ class Starboard(commands.Cog):
                     await self.db.execute("INSERT INTO awarded(msg,msg_sb,msg_ch,guild,author) VALUES(?,?,?,?,?)",
                                           (msg_id, msg_sb.id, msg_ch_id, guild_id, msg.author.id))
         await self.db.commit()
-        return True
+        return "ok"
 
     @commands.Cog.listener()
     async def on_raw_message_delete(self, ev:discord.RawMessageDeleteEvent):
@@ -328,11 +339,11 @@ class Starboard(commands.Cog):
 
     # here we provide a slash command and a text command with slightly different APIs. todo remove some redundancy
 
-    @app_commands.command()
+    @app_commands.command(name="starconfig")
     @app_commands.rename(sb="starboard-channel", minimum="minimum-stars", timeout_d="timeout")
     @app_commands.default_permissions(manage_channels=True)
-    async def starconfig(self, c:discord.Interaction,
-                         sb:discord.TextChannel|None=None, minimum:int|None=None, timeout_d:int|None=None):
+    async def slash_starconfig(self, c:discord.Interaction,
+                               sb:discord.TextChannel|None=None, minimum:int|None=None, timeout_d:int|None=None):
         """change starboard configuration like starboard channel or minimum stars.
         if no arguments are given, shows the current configuration.
         if not all arguments are given, the rest will not be modified.
