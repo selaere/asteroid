@@ -39,7 +39,7 @@ async def sync(ctx:commands.Context):
     await ctx.send("ok")
 
 async def do():
-    bot.db = aiosqlite.connect("bees.db")
+    bot.db = aiosqlite.connect("bees.db", autocommit=False)
     async with bot, bot.db:
         await bot.load_extension("starboard")
         with open("token") as f: tok=f.read().strip()

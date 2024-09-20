@@ -16,7 +16,7 @@ FROM_MENU = 2
 # timeout_d (interval in days) is optional. after timeout_d passes from the message being sent, the message will be
 #   locked in its awarded/unawarded state. however, star counts are still updated.
 
-SCHEMA = f"""BEGIN;
+SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS guilds(
     guild   INTEGER PRIMARY KEY,
     minimum INTEGER NOT NULL DEFAULT 3,
@@ -38,7 +38,7 @@ CREATE TABLE IF NOT EXISTS stars(
     UNIQUE(starrer, msg)
 );
 CREATE INDEX IF NOT EXISTS idx_starred ON stars(msg); 
-COMMIT;"""
+"""
 
 import discord
 import discord.app_commands as app_commands
@@ -131,6 +131,21 @@ class Starboard(commands.Cog):
                         embed.set_image(url=reply.attachments[0].url).set_footer(text="attachment shown is from reply")
         return { "content":"⭐🌟💫🤩🌌"[min(4,count//5)]+" "+msg.jump_url, "embed":embed }
 
+    async def forget_message(self, msg_id:int, **r):
+        if (await self.db.execute("DELETE FROM stars WHERE msg=?", (msg_id,))).rowcount != 0:
+            await self.unaward(msg_id, **r)
+    
+    # does nothing if the message wasn't awarded
+    async def unaward(self, msg_id:int, sb_id:int|None=None, **_):
+        match await self.db_fetchone("DELETE FROM awarded WHERE msg=? RETURNING msg_sb,guild", (msg_id,)):
+            case msg_sb_id, guild_id:
+                try:
+                    if sb_id is not None:
+                        sb_id, = await self.db_fetchone("SELECT sb FROM guilds WHERE guild=?", (guild_id,))
+                    # huh. this is problematic if sb changes
+                    await self.partial_msg(sb_id,msg_sb_id).delete()
+                except discord.Forbidden: pass
+
     ### STARRING
     # can work with reactions (`on_raw_reaction_{add,remove}`, "raw" in case someone stars older messages)
     #     or the pop up menu (`{,un}star_menu`, added in `__main__`).
@@ -177,21 +192,6 @@ class Starboard(commands.Cog):
             case None: raise NotConfigured()
             case minimum,sb_id,timeout_d:
                 return {"minimum":minimum, "sb_id":sb_id, "timeout_d":timeout_d, "guild_id":guild_id}
-
-    async def forget_message(self, msg_id:int, **r):
-        if (await self.db.execute("DELETE FROM stars WHERE msg=?", (msg_id,))).rowcount != 0:
-            await self.unaward(msg_id, **r)
-    
-    # does nothing if the message wasn't awarded
-    async def unaward(self, msg_id:int, sb_id:int|None=None, **_):
-        match await self.db_fetchone("DELETE FROM awarded WHERE msg=? RETURNING msg_sb,guild", (msg_id,)):
-            case msg_sb_id, guild_id:
-                try:
-                    if sb_id is not None:
-                        sb_id, = await self.db_fetchone("SELECT sb FROM guilds WHERE guild=?", (guild_id,))
-                    # huh. this is problematic if sb changes
-                    await self.partial_msg(sb_id,msg_sb_id).delete()
-                except discord.Forbidden: pass
 
     # if the message was a starboard message, we want to star the original instead.
     # set medium to FROM_REACT_SB if this happened. the menu functions ignore this, overriding it with medium=FROM_MENU,
@@ -330,14 +330,26 @@ class Starboard(commands.Cog):
     async def printout(self, guild_id):  # brief output of all the settings if no args are given
         match await self.db_fetchone("SELECT minimum,sb,timeout FROM guilds WHERE guild=?", (guild_id,)):
             case minimum, sb_id, None:
-                msg = f"minimum stars: {minimum}\nstarboard channel: <#{sb_id}>\ntimeout: never"
+                msg = f"starboard channel: <#{sb_id}>\nminimum stars: {minimum}\ntimeout: never"
             case minimum, sb_id, timeout_d:
-                msg = f"minimum stars: {minimum}\nstarboard channel: <#{sb_id}>\ntimeout: {timeout_d} days"
+                msg = f"starboard channel: <#{sb_id}>\nminimum stars: {minimum}\ntimeout: {timeout_d} days"
             case None:
                 msg = "unconfigured"
         return msg
 
-    # here we provide a slash command and a text command with slightly different APIs. todo remove some redundancy
+    async def set_sb(self, sb: discord.TextChannel, guild_id: int) -> None:
+        if sb.guild.id != guild_id: raise ValueError("eat bricks")
+        await self.db.execute("INSERT OR REPLACE INTO guilds(sb,guild) VALUES(?,?)", (sb.id, guild_id))
+    async def set_minimum(self, minimum: int, guild_id: int) -> None:
+        cur = await self.db.execute("UPDATE guilds SET minimum=? WHERE guild=?", (minimum, guild_id))
+        if cur.rowcount==0: raise ValueError("no starboard channel set")
+    async def set_timeout(self, timeout_d: int, guild_id: int) -> None:
+        if timeout_d==0: timeout_d = None
+        elif timeout_d<0: raise ValueError("eat bricks")
+        cur = await self.db.execute("UPDATE guilds SET timeout=? WHERE guild=?", (timeout_d, guild_id))
+        if cur.rowcount==0: raise ValueError("no starboard channel set")
+
+    # here we provide a slash command and a text command with slightly different APIs.
 
     @app_commands.command(name="starconfig")
     @app_commands.rename(sb="starboard-channel", minimum="minimum-stars", timeout_d="timeout")
@@ -353,28 +365,19 @@ class Starboard(commands.Cog):
         :param timeout_d: timeout period in days. after this period, messages cannot be added to or removed
             from the starboard.
         """
+        await self.db.commit()  # just in case, we don't want to rollback earlier stuff
         if sb is None and minimum is None and timeout_d is None:
             return await ephemeral(c, await self.printout(c.guild_id))
-        else:
-            if sb is not None:  # do this first in case minimum/timeout isn't set, bc that has a minimum value
-                if sb.guild != c.guild: return await ephemeral(c,"eat bricks")
-                cur = await self.db.execute("INSERT OR REPLACE INTO guilds(guild,sb) VALUES(?,?)", (c.guild_id, sb.id))
-            if minimum is not None:
-                if minimum < 1: return await ephemeral(c,"eat bricks")
-                cur = await self.db.execute("UPDATE guilds SET minimum=? WHERE guild=?", (minimum, c.guild_id))
-                if cur.rowcount==0:
-                    await self.db.rollback()
-                    return await ephemeral(c, "no starboard channel set")
-            if timeout_d is not None:
-                if timeout_d == 0: timeout_d = None
-                elif timeout_d < 0: return await ephemeral(c,"eat bricks")
-                cur = await self.db.execute("UPDATE guilds SET timeout=? WHERE guild=?", (timeout_d, c.guild_id))
-                if cur.rowcount==0:
-                    await self.db.rollback()
-                    return await ephemeral(c, "no starboard channel set")
+        try:
+            if sb        is not None: await self.set_sb     (sb,        c.guild_id)
+            if minimum   is not None: await self.set_minimum(minimum,   c.guild_id)
+            if timeout_d is not None: await self.set_timeout(timeout_d, c.guild_id)
+        except ValueError as e:
+            await self.db.rollback()
+            return await ephemeral(c, e.args[0])
 
-        await ephemeral(c, "ok")
         await self.db.commit()
+        await ephemeral(c, "ok")
     
     @commands.command()
     @commands.has_permissions(manage_channels=True)
@@ -390,36 +393,26 @@ class Starboard(commands.Cog):
         minimum: the minimum star count to reach starboard.
         timeout: timeout period in days. after this period, messages cannot be added to or removed from the starboard.
         """
+        await self.db.commit()  # just in case, we don't want to rollback earlier stuff
         args = [*args]
         if len(args) == 0:
             return await ctx.send(await self.printout(ctx.guild.id))
-        while len(args) > 0:
-            match args.pop(0):
-                case "sb" | "starboard" | "starboard-channel":
-                    sb = await commands.TextChannelConverter().convert(ctx, args.pop(0))
-                    if sb.guild != ctx.guild: return await ctx.send("eat bricks")
-                    cur = await self.db.execute("INSERT OR REPLACE INTO guilds(guild,sb) VALUES(?,?)", (ctx.guild.id, sb.id))
-                case "minimum":
-                    try: minimum = int(args.pop(0))
-                    except TypeError: return await ctx.send("eat bricks")
-                    cur = await self.db.execute("UPDATE guilds SET minimum=? WHERE guild=?", (minimum, ctx.guild.id))
-                    if cur.rowcount==0:
-                        await self.db.rollback()
-                        return await ctx.send("no starboard channel set")
-                case "timeout":
-                    try: timeout_d = int(args.pop(0))
-                    except TypeError: return await ctx.send("eat bricks")
-                    if timeout_d == 0: timeout_d = None
-                    elif timeout_d < 0: return await ephemeral(c,"eat bricks")
-                    cur = await self.db.execute("UPDATE guilds SET timeout=? WHERE guild=?", (timeout_d, ctx.guild.id))
-                    if cur.rowcount==0:
-                        await self.db.rollback()
-                        return await ctx.send("no starboard channel set")
-                case x:
-                    await self.db.rollback()
-                    return await ctx.send(f"wtf is a {x}")
-        await ctx.send("ok")
+        try:
+            while len(args) > 0:
+                match args.pop(0):
+                    case "sb" | "starboard" | "starboard-channel":
+                        try:
+                            sb = await commands.TextChannelConverter().convert(ctx, args.pop(0))
+                        except commands.BadArgument: raise ValueError("not a channel")
+                        await self.set_sb(sb, ctx.guild.id)
+                    case "minimum": await self.set_minimum(int(args.pop(0)), ctx.guild.id)
+                    case "timeout": await self.set_timeout(int(args.pop(0)), ctx.guild.id)
+                    case x: raise ValueError("what is a "+x)
+        except ValueError as e:  # also triggered by the int() conversions
+            await self.db.rollback()
+            return await ctx.send(e.args[0])
         await self.db.commit()
+        await ctx.send("ok")
 
     @commands.command()
     @commands.has_permissions(manage_channels=True)
@@ -428,28 +421,28 @@ class Starboard(commands.Cog):
         :param sb: the starboard channel in question
         """
         scanned = 0
-        mismatches:list[discord.Message] = []
-        unparsable:list[discord.Message] = []
+        mismatches: list[discord.Message] = []
+        unparsable: list[discord.Message] = []
         async for msg_sb in sb.history(limit=None):
             if msg_sb.author.id != 80528701850124288: continue 
             if not (m := re.fullmatch(r".(?: \*\*(\d+)\*\*)? <#(\d+)> ID: (\d+)", msg_sb.content)):
                 unparsable.append(msg_sb)
                 continue
-            count,msg_ch_id,msg_id = int(m[1] or "1"), int(m[2]), int(m[3])
+            count, msg_ch_id, msg_id = int(m[1] or "1"), int(m[2]), int(m[3])
             msg:discord.Message = await self.fetch_msg(msg_ch_id,msg_id)
             cnt_before = self.db.total_changes
             # get original stars
             if (stars := discord.utils.get(msg.reactions, emoji="⭐")):
                 async for starrer in stars.users():
                     if starrer.id == msg.author.id: continue  # cheeky self-star
-                    await self.db.execute("INSERT OR IGNORE INTO stars(starrer,msg,guild,medium) VALUES(?,?,?,0)",
-                        (starrer.id,msg_id,ctx.guild.id))
+                    await self.db.execute("INSERT OR IGNORE INTO stars(starrer,msg,guild,medium) VALUES(?,?,?,?)",
+                        (starrer.id, msg_id, ctx.guild.id, FROM_REACT))
             # get msg_sb stars
             if (stars := discord.utils.get(msg_sb.reactions, emoji="⭐")):
                 async for starrer in stars.users():
                     if starrer == msg.author.id: continue
-                    await self.db.execute("INSERT OR IGNORE INTO stars(starrer,msg,guild,medium) VALUES(?,?,?,1)",
-                        (starrer.id,msg_id,ctx.guild.id))
+                    await self.db.execute("INSERT OR IGNORE INTO stars(starrer,msg,guild,medium) VALUES(?,?,?,?)",
+                        (starrer.id, msg_id, ctx.guild.id, FROM_REACT_SB))
             # ignore stars added by command (hopefully no one did that)
             cnt_computed = self.db.total_changes - cnt_before
             if cnt_computed != count: mismatches.append(msg_sb)
