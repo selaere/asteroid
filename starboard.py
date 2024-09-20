@@ -52,8 +52,6 @@ import logging
 def calc_color(count:int) -> discord.Colour:
     return discord.Colour.from_rgb(255, 255, max(0,min(255,1024//(count+4)-20)))
 
-def ephemeral(c, *args, **kwargs): return c.response.send_message(*args, ephemeral=True, **kwargs)
-
 # True if the timeout hasn't passed yet. used as a precondition to adding/removing a message from the starboard
 def on_time(msg_id:int, timeout_d:int|None) -> bool:
     if timeout_d is None: return True
@@ -179,13 +177,13 @@ class Starboard(commands.Cog):
         r  = await self.get_guild_info(c.guild_id)
         r |= await self.find_msg(**msg_fields(msg), **r) | {"medium":FROM_MENU}
         txt = await self.add_star(user_id=c.user.id, **r)
-        await ephemeral(c, txt)
+        await c.response.send_message(txt, ephemeral=True)
 
     async def unstar_menu(self, c:discord.Interaction, msg:discord.Message):
         r  = await self.get_guild_info(c.guild_id)
         r |= await self.find_msg(**msg_fields(msg), **r) | {"medium":FROM_MENU}
         txt = await self.remove_star(user_id=c.user.id, **r)
-        await ephemeral(c, txt)
+        await c.response.send_message(txt, ephemeral=True)
 
     async def get_guild_info(self, guild_id:int) -> dict:
         match await self.db_fetchone("SELECT minimum,sb,timeout FROM guilds WHERE guild=?", (guild_id,)):
@@ -367,20 +365,20 @@ class Starboard(commands.Cog):
         """
         await self.db.commit()  # just in case, we don't want to rollback earlier stuff
         if sb is None and minimum is None and timeout_d is None:
-            return await ephemeral(c, await self.printout(c.guild_id))
+            return await c.response.send_message(await self.printout(c.guild_id))
         try:
             if sb        is not None: await self.set_sb     (sb,        c.guild_id)
             if minimum   is not None: await self.set_minimum(minimum,   c.guild_id)
             if timeout_d is not None: await self.set_timeout(timeout_d, c.guild_id)
         except ValueError as e:
             await self.db.rollback()
-            return await ephemeral(c, e.args[0])
+            return await c.response.send_message(e.args[0])
 
         await self.db.commit()
-        await ephemeral(c, "ok")
+        await c.response.send_message("ok. new settings:\n" + await self.printout(c.guild_id))
     
     @commands.command()
-    @commands.has_permissions(manage_channels=True)
+    @commands.check_any(commands.has_permissions(manage_channels=True), commands.is_owner())
     async def starconfig(self, ctx:commands.Context, *args):
         """change starboard configuration like starboard channel or minimum stars.
         
@@ -412,10 +410,10 @@ class Starboard(commands.Cog):
             await self.db.rollback()
             return await ctx.send(e.args[0])
         await self.db.commit()
-        await ctx.send("ok")
+        await ctx.send("ok. new settings:\n" + await self.printout(ctx.guild.id))
 
     @commands.command()
-    @commands.has_permissions(manage_channels=True)
+    @commands.check_any(commands.has_permissions(manage_channels=True), commands.is_owner())
     async def import_rdanny(self, ctx:commands.Context, sb:discord.TextChannel):
         """imports messages from an R. Danny starboard channel.
         :param sb: the starboard channel in question
@@ -460,10 +458,10 @@ class Starboard(commands.Cog):
 
     @commands.Cog.listener()
     async def on_command_error(self, ctx:commands.Context, exc:Exception) -> None:
-        if isinstance(exc, commands.MissingRequiredArgument):                  await ctx.send("can you elaborate")
-        elif isinstance(exc, commands.BadArgument):                            await ctx.send("wdym")
-        elif isinstance(exc, commands.CommandNotFound):                        pass
-        elif isinstance(exc, (commands.MissingPermissions,commands.NotOwner)): await ctx.send("wrong alt. bozo")
+        if   isinstance(exc, commands.MissingRequiredArgument): await ctx.send("can you elaborate")
+        elif isinstance(exc, commands.BadArgument):             await ctx.send("wdym")
+        elif isinstance(exc, commands.CommandNotFound):         pass
+        elif isinstance(exc, commands.CheckFailure):            await ctx.send("wrong alt. bozo")
         else:
             await ctx.send(f"{exc} :(")
             logging.exception(":(", exc_info=exc)
