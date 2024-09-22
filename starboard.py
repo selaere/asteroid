@@ -421,13 +421,18 @@ class Starboard(commands.Cog):
         scanned = 0
         mismatches: list[discord.Message] = []
         unparsable: list[discord.Message] = []
+        unfindable: list[discord.Message] = []
         async for msg_sb in sb.history(limit=None):
             if msg_sb.author.id != 80528701850124288: continue 
             if not (m := re.fullmatch(r".(?: \*\*(\d+)\*\*)? <#(\d+)> ID: (\d+)", msg_sb.content)):
                 unparsable.append(msg_sb)
                 continue
             count, msg_ch_id, msg_id = int(m[1] or "1"), int(m[2]), int(m[3])
-            msg:discord.Message = await self.fetch_msg(msg_ch_id,msg_id)
+            try:
+                msg = await self.fetch_msg(msg_ch_id,msg_id)
+            except discord.NotFound:
+                unfindable.append(msg_sb)
+                continue
             cnt_before = self.db.total_changes
             # get original stars
             if (stars := discord.utils.get(msg.reactions, emoji="⭐")):
@@ -452,6 +457,7 @@ class Starboard(commands.Cog):
         await ctx.send(f"{scanned} messages added" +
             "\nstar count mismatches: "       *(len(mismatches)!=0) + ", ".join(i.jump_url for i in mismatches) +
             "\nmessages i didn't understand: "*(len(unparsable)!=0) + ", ".join(i.jump_url for i in unparsable) +
+            "\nmessages i didn't find: "      *(len(unfindable)!=0) + ", ".join(i.jump_url for i in unfindable) +
             "\nnow you need to unconfigure r.danny and configure asteroid, i think")
     
     ### ERRORS

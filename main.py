@@ -6,6 +6,7 @@ import asyncio
 import logging
 
 discord.utils.setup_logging(level=logging.DEBUG)
+discord.utils.setup_logging(level=logging.DEBUG, handler=logging.FileHandler('log.log'))
 
 intents=discord.Intents().default()
 intents.message_content=True
