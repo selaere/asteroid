@@ -430,7 +430,7 @@ class Starboard(commands.Cog):
             count, msg_ch_id, msg_id = int(m[1] or "1"), int(m[2]), int(m[3])
             try:
                 msg = await self.fetch_msg(msg_ch_id,msg_id)
-            except discord.NotFound:
+            except AttributeError, discord.NotFound:
                 unfindable.append(msg_sb)
                 continue
             cnt_before = self.db.total_changes
