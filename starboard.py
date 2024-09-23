@@ -92,7 +92,7 @@ class Starboard(commands.Cog):
     def partial_msg(self, channel:int, id:int) -> discord.PartialMessage:
         return self.bot.get_partial_messageable(channel).get_partial_message(id)
     async def fetch_msg(self, channel:int, id:int) -> discord.Message:
-        return await partial_msg(channel,id).fetch()
+        return await self.partial_msg(channel,id).fetch()
     
     # only intended for starred messages, to handle message disappearance. but it will do nothing to other messages
     async def fetch_msg_opt(self, msg_ch_id:int, msg_id:int):
@@ -437,7 +437,7 @@ class Starboard(commands.Cog):
             except (discord.NotFound, discord.Forbidden):
                 unfindable.append(msg_sb)
                 continue
-            cnt_before = self.db.total_changes
+            changes_before = self.db.total_changes
             # get original stars
             if (stars := discord.utils.get(msg.reactions, emoji="⭐")):
                 async for starrer in stars.users():
@@ -450,9 +450,11 @@ class Starboard(commands.Cog):
                     if starrer == msg.author.id: continue
                     await self.db.execute("INSERT OR IGNORE INTO stars(starrer,msg,guild,medium) VALUES(?,?,?,?)",
                         (starrer.id, msg_id, ctx.guild.id, FROM_REACT_SB))
+            changes_after = self.db.total_changes
             # ignore stars added by command (hopefully no one did that)
-            cnt_computed = self.db.total_changes - cnt_before
-            if cnt_computed != count: mismatches.append(msg_sb)
+            count_computed = self.db_fetchone("SELECT count(*) FROM stars WHERE msg=?", (msg_id,))
+            if count != count_computed: mismatches.append(msg_sb)
+            print(count, count_computed, changes_after - changes_before)
             # add awarded
             await self.db.execute("INSERT OR IGNORE INTO awarded(msg,msg_sb,msg_ch,guild,author) VALUES(?,?,?,?,?)",
                                   (msg_id, msg_sb.id, msg_ch_id, ctx.guild.id, msg.author.id))
