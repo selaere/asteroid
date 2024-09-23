@@ -48,6 +48,7 @@ import asyncio
 import datetime
 import re
 import logging
+from dataclasses import dataclass
 
 def calc_color(count:int) -> discord.Colour:
     return discord.Colour.from_rgb(255, 255, max(0,min(255,1024//(count+4)-20)))
@@ -74,7 +75,7 @@ class NotConfigured(Exception): pass
 class Starboard(commands.Cog):
 
     def __init__(self, bot:commands.Bot) -> None:
-        self.bot = bot
+        self.bot: commands.Bot = bot
         self.db: aiosqlite.Connection = bot.db  # shortcut :3
         # yes you need to register these manually
         self.bot.tree.add_command(app_commands.ContextMenu(name="⭐ Star",  callback=self.star_menu  ), override=True)
@@ -82,11 +83,16 @@ class Starboard(commands.Cog):
 
     ### HELPERS
 
-    # these aren't that annoying i'm just a professional coper
+    # get the channel properly (because archived threads are not kept in cache)
+    async def get_channel(self, guild_id:int, channel_id:int) -> discord.TextChannel:
+        match self.bot.get_channel(channel_id):
+            case None: return await self.bot.get_guild(guild).fetch_channel(channel_id)
+            case x:    return x
+
     def partial_msg(self, channel:int, id:int) -> discord.PartialMessage:
-        return self.bot.get_channel(channel).get_partial_message(id)
+        return self.bot.get_partial_messageable(channel).get_partial_message(id)
     async def fetch_msg(self, channel:int, id:int) -> discord.Message:
-        return await self.bot.get_channel(channel).fetch_message(id)
+        return await partial_msg(channel,id).fetch()
     
     # only intended for starred messages, to handle message disappearance. but it will do nothing to other messages
     async def fetch_msg_opt(self, msg_ch_id:int, msg_id:int):
@@ -105,12 +111,10 @@ class Starboard(commands.Cog):
         except (discord.NotFound, discord.Forbidden, AttributeError):
             return None
 
-    def channel_allowed(self, ch_id:int) -> bool:
-        ch = self.bot.get_channel(ch_id)
-        logging.warn(repr(ch))
+    async def channel_allowed(self, guild_id:int, ch_id:int) -> bool:
+        ch = await self.get_channel(guild_id, ch_id)
         if isinstance(ch, discord.Thread):
             ch = ch.parent
-        logging.warn(repr(ch))
         return re.search(r"\bcw\b", ch.name) is None
     
     # builds a message for starboard. given in this funny way so it can be unpacked into edit/send
@@ -132,7 +136,7 @@ class Starboard(commands.Cog):
     async def forget_message(self, msg_id:int, **r):
         if (await self.db.execute("DELETE FROM stars WHERE msg=?", (msg_id,))).rowcount != 0:
             await self.unaward(msg_id, **r)
-    
+
     # does nothing if the message wasn't awarded
     async def unaward(self, msg_id:int, sb_id:int|None=None, **_):
         match await self.db_fetchone("DELETE FROM awarded WHERE msg=? RETURNING msg_sb,guild", (msg_id,)):
@@ -209,7 +213,7 @@ class Starboard(commands.Cog):
     async def add_star(self, minimum:int, sb_id:int, timeout_d:int|None, msg_id:int, msg_ch_id:int, guild_id:int,
                        author_id:int, user_id:int, medium:int, msg:discord.Message|None=None) -> str:
         if user_id == author_id: return "rule 11"
-        if not self.channel_allowed(msg_ch_id): return "no starring in cw channels. sorry!"
+        if not await self.channel_allowed(guild_id, msg_ch_id): return "no starring in cw channels. sorry!"
         if (await self.db.execute("INSERT OR IGNORE INTO stars(starrer,msg,guild,medium) VALUES(?,?,?,?)",
                                   (user_id,msg_id,guild_id,medium))).rowcount == 0:  # try to add star
             return "you already starred that, bozo!"  # if the star was there already (when above query fails UNIQUE)
@@ -223,7 +227,7 @@ class Starboard(commands.Cog):
                     except discord.Forbidden: pass  # if the message was deleted, or on migration
                 case None if on_time(msg_id,timeout_d):
                     # not in starboard yet (usually bc count==minimum, or minimum was higher back then)
-                    msg_sb = await self.bot.get_channel(sb_id).send(**await self.build_message(count, msg))
+                    msg_sb = await self.bot.get_partial_messageable(sb_id).send(**await self.build_message(count, msg))
                     await self.db.execute("INSERT INTO awarded(msg,msg_sb,msg_ch,guild,author) VALUES(?,?,?,?,?)",
                                         (msg_id, msg_sb.id, msg_ch_id, guild_id, msg.author.id))
         await self.db.commit()
@@ -254,7 +258,7 @@ class Starboard(commands.Cog):
                 case None if on_time(msg_id,timeout_d):
                     # edge case: the message was and still is award-worthy, but it wasn't sent (maybe because minimum
                     # was higher), and the timeout hasn't passed. we add it anyways, to be consistent with star add
-                    msg_sb = await self.bot.get_channel(sb_id).send(**await self.build_message(count, msg))
+                    msg_sb = await self.bot.get_partial_messageable(sb_id).send(**await self.build_message(count, msg))
                     await self.db.execute("INSERT INTO awarded(msg,msg_sb,msg_ch,guild,author) VALUES(?,?,?,?,?)",
                                           (msg_id, msg_sb.id, msg_ch_id, guild_id, msg.author.id))
         await self.db.commit()

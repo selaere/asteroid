@@ -1,4 +1,5 @@
 venv
+logs
 token
 .vscode
 bees.db
