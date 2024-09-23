@@ -452,7 +452,7 @@ class Starboard(commands.Cog):
                         (starrer.id, msg_id, ctx.guild.id, FROM_REACT_SB))
             changes_after = self.db.total_changes
             # ignore stars added by command (hopefully no one did that)
-            count_computed = self.db_fetchone("SELECT count(*) FROM stars WHERE msg=?", (msg_id,))
+            count_computed = await self.db_fetchone("SELECT count(*) FROM stars WHERE msg=?", (msg_id,))
             if count != count_computed: mismatches.append(msg_sb)
             logging.warn(f"{count=}, {count_computed=}, {changes_after - changes_before=}")
             # add awarded
