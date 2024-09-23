@@ -127,7 +127,7 @@ class Starboard(commands.Cog):
         if msg.reference is not None:
             match await self.resolve_ref(msg.reference):
                 case None: embed.add_field(name="replying to some message",value="sorry")
-                case msg:
+                case reply:
                     embed.add_field(name=f"replying to {reply.author.display_name}", value=short_disp(reply), inline=False)
                     if att_no==0 and len(reply.attachments)>0:
                         embed.set_image(url=reply.attachments[0].url).set_footer(text="attachment shown is from reply")
@@ -452,7 +452,7 @@ class Starboard(commands.Cog):
                         (starrer.id, msg_id, ctx.guild.id, FROM_REACT_SB))
             changes_after = self.db.total_changes
             # ignore stars added by command (hopefully no one did that)
-            count_computed = await self.db_fetchone("SELECT count(*) FROM stars WHERE msg=?", (msg_id,))
+            count_computed, = await self.db_fetchone("SELECT count(*) FROM stars WHERE msg=?", (msg_id,))
             if count != count_computed: mismatches.append(msg_sb)
             logging.warn(f"{count=}, {count_computed=}, {changes_after - changes_before=}")
             # add awarded
