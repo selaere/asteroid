@@ -454,7 +454,7 @@ class Starboard(commands.Cog):
             # ignore stars added by command (hopefully no one did that)
             count_computed = self.db_fetchone("SELECT count(*) FROM stars WHERE msg=?", (msg_id,))
             if count != count_computed: mismatches.append(msg_sb)
-            print(count, count_computed, changes_after - changes_before)
+            logging.warn(f"{count=}, {count_computed=}, {changes_after - changes_before=}")
             # add awarded
             await self.db.execute("INSERT OR IGNORE INTO awarded(msg,msg_sb,msg_ch,guild,author) VALUES(?,?,?,?,?)",
                                   (msg_id, msg_sb.id, msg_ch_id, ctx.guild.id, msg.author.id))
