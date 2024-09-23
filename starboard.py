@@ -309,20 +309,22 @@ class Starboard(commands.Cog):
             ))
 
     @commands.hybrid_command()
-    async def random(self, ctx:commands.Context):
+    async def random(self, ctx:commands.Context, user:discord.Member|None=None):
         """see a random starred message"""
         msg_id,msg_ch_id = await self.db_fetchone(
-            "SELECT msg,msg_ch FROM awarded WHERE guild=? ORDER BY random() LIMIT 1", (ctx.guild.id,))
-        count, = await self.db_fetchone("SELECT count(*) FROM stars WHERE msg=?", (msg_id,))
+            "SELECT msg,msg_ch FROM awarded WHERE guild=? AND (? NOTNULL OR user=?) ORDER BY random() LIMIT 1",
+                (ctx.guild.id, user,user))
+        count, = await self.db_fetchone("SELECT count(*) FROM stars WHERE msg=?", msg_id)
         await ctx.send(**await self.build_message(count, await self.fetch_msg(msg_ch_id,msg_id)))
 
     @commands.command(description="show a certain starred message")
     async def show(self, ctx:commands.Context, msg:discord.Message|None):
         """show a certain starred message
+
         :param msg: the message to show. may be given as a reply, or as an ID if in the same channel, or as a jump link.
         """
         match msg, ctx.message.reference:
-            case None, None: return await ctx.send("can you elaborate")
+            case None, None: return await ctx.send("wdym")
             case None, ref:  msg = await self.resolve_ref(ref)  # this COULD fail but realistically it won't
         count, = await self.db_fetchone("SELECT count(*) FROM stars WHERE msg=?", (msg.id,))
         await ctx.send(**await self.build_message(count, msg))
