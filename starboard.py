@@ -312,7 +312,7 @@ class Starboard(commands.Cog):
     async def random(self, ctx:commands.Context, user:discord.Member|None=None):
         """see a random starred message"""
         msg_id,msg_ch_id = await self.db_fetchone(
-            "SELECT msg,msg_ch FROM awarded WHERE guild=? AND (? NOTNULL OR user=?) ORDER BY random() LIMIT 1",
+            "SELECT msg,msg_ch FROM awarded WHERE guild=? AND (? NOTNULL OR author=?) ORDER BY random() LIMIT 1",
                 (ctx.guild.id, user,user))
         count, = await self.db_fetchone("SELECT count(*) FROM stars WHERE msg=?", msg_id)
         await ctx.send(**await self.build_message(count, await self.fetch_msg(msg_ch_id,msg_id)))
