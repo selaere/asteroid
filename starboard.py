@@ -315,7 +315,7 @@ class Starboard(commands.Cog):
         :param user: optional. filter posts from a certain user"""
         if user is None:
             out = await self.db_fetchone(
-                "SELECT msg,msg_ch FROM awarded WHERE guild=? ORDER BY random() LIMIT 1", (ctx.guild.id))
+                "SELECT msg,msg_ch FROM awarded WHERE guild=? ORDER BY random() LIMIT 1", (ctx.guild.id,))
         else:
             out = await self.db_fetchone(
                 "SELECT msg,msg_ch FROM awarded WHERE guild=? AND author=? ORDER BY random() LIMIT 1",
@@ -323,7 +323,7 @@ class Starboard(commands.Cog):
         match out:
             case None: await ctx.send("no starred messages :(")
             case msg_id, msg_ch_id:
-                count, = await self.db_fetchone("SELECT count(*) FROM stars WHERE msg=?", msg_id)
+                count, = await self.db_fetchone("SELECT count(*) FROM stars WHERE msg=?", (msg_id,))
                 await ctx.send(**await self.build_message(count, await self.fetch_msg(msg_ch_id,msg_id)))
 
     @commands.command(description="show a certain starred message")
