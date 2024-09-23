@@ -98,7 +98,7 @@ class Starboard(commands.Cog):
     async def fetch_msg_opt(self, msg_ch_id:int, msg_id:int):
         try:
             return await self.fetch_msg(msg_ch_id,msg_id)
-        except (discord.NotFound, discord.Forbidden, AttributeError):
+        except (discord.NotFound, discord.Forbidden):
             await self.forget_message(msg_id)
             return None
 
@@ -108,7 +108,7 @@ class Starboard(commands.Cog):
     async def resolve_ref(self, ref:discord.MessageReference) -> discord.Message|None:
         try:
             return ref.cached_message or await self.fetch_msg(ref.channel_id,ref.message_id)
-        except (discord.NotFound, discord.Forbidden, AttributeError):
+        except (discord.NotFound, discord.Forbidden):
             return None
 
     async def channel_allowed(self, guild_id:int, ch_id:int) -> bool:
@@ -434,7 +434,7 @@ class Starboard(commands.Cog):
             count, msg_ch_id, msg_id = int(m[1] or "1"), int(m[2]), int(m[3])
             try:
                 msg = await self.fetch_msg(msg_ch_id,msg_id)
-            except (AttributeError, discord.NotFound):
+            except (discord.NotFound, discord.Forbidden):
                 unfindable.append(msg_sb)
                 continue
             cnt_before = self.db.total_changes
