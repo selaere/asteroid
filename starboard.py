@@ -139,8 +139,9 @@ class Starboard(commands.Cog):
 
     # does nothing if the message wasn't awarded
     async def unaward(self, msg_id:int, sb_id:int|None=None, **_):
-        match await self.db_fetchone("DELETE FROM awarded WHERE msg=? RETURNING msg_sb,guild", (msg_id,)):
+        match await self.db_fetchone("SELECT msg_sb,guild FROM awarded WHERE msg=?", (msg_id,)):
             case msg_sb_id, guild_id:
+                await self.db.execute("DELETE FROM awarded WHERE msg=?", (msg_id,))
                 try:
                     if sb_id is not None:
                         sb_id, = await self.db_fetchone("SELECT sb FROM guilds WHERE guild=?", (guild_id,))
