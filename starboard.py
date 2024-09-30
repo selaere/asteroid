@@ -51,7 +51,7 @@ import logging
 from dataclasses import dataclass
 
 def calc_color(count:int) -> discord.Colour:
-    return discord.Colour.from_rgb(255, 255, max(0,min(255,1024//(count+4)-20)))
+    return discord.Colour.from_rgb(255, 255, max(0,min(255,1024//(count+3)-20)))
 
 # True if the timeout hasn't passed yet. used as a precondition to adding/removing a message from the starboard
 def on_time(msg_id:int, timeout_d:int|None) -> bool:
