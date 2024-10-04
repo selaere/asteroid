@@ -62,7 +62,7 @@ def on_time(msg_id:int, timeout_d:int|None) -> bool:
     return datetime.datetime.now(datetime.UTC) < send_time + datetime.timedelta(days=timeout_d)
 
 def short_disp(msg:discord.Message, escape=False) -> str:  # used for the *top messages and also replies in starboard
-    return ( ("[forwarding]" if msg.flags & FLAG_FORWARDED else "[replying] ")*(msg.reference is not None)
+    return ( ("[forwarding]" if msg.flags.value & FLAG_FORWARDED else "[replying] ")*(msg.reference is not None)
            + (discord.utils.escape_markdown(msg.system_content.replace("\n"," ")) if escape else msg.system_content)
            + " [attachment]"*len(msg.attachments)
            + " [sticker]"*len(msg.stickers)
@@ -121,7 +121,7 @@ class Starboard(commands.Cog):
         if att_no>1: embed.set_footer(text=f"{att_no-1} attachment{'s are' if att_no!=2 else ' is'} not being shown")
         embed.set_author(name=msg.author.display_name, icon_url=msg.author.display_avatar.url)
         if msg.reference is not None:
-            start = "forward" if msg.flags & FLAG_FORWARDED else "reply"
+            start = "forward" if msg.flags.value & FLAG_FORWARDED else "reply"
             match await msg.reference.resolved:
                 case discord.DeletedReferencedMessage: embed.add_field(name=start+"ing to some message", value="sorry")
                 case reply:
