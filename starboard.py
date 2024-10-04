@@ -122,8 +122,9 @@ class Starboard(commands.Cog):
         embed.set_author(name=msg.author.display_name, icon_url=msg.author.display_avatar.url)
         if msg.reference is not None:
             start = "forward" if msg.flags.value & FLAG_FORWARDED else "reply"
-            match await msg.reference.resolved:
-                case discord.DeletedReferencedMessage: embed.add_field(name=start+"ing to some message", value="sorry")
+            match msg.reference.resolved:
+                case discord.DeletedReferencedMessage | None:
+                    embed.add_field(name=start+"ing to some message", value="sorry")
                 case reply:
                     embed.add_field(name=start+"ing to "+reply.author.display_name, value=short_disp(reply), inline=False)
                     if att_no==0 and len(reply.attachments)>0:
