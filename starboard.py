@@ -50,6 +50,8 @@ import re
 import logging
 from dataclasses import dataclass
 
+FLAG_FORWARDED = 16384
+
 def calc_color(count:int) -> discord.Colour:
     return discord.Colour.from_rgb(255, 255, max(0,min(255,1024//(count+3)-20)))
 
@@ -60,8 +62,8 @@ def on_time(msg_id:int, timeout_d:int|None) -> bool:
     return datetime.datetime.now(datetime.UTC) < send_time + datetime.timedelta(days=timeout_d)
 
 def short_disp(msg:discord.Message, escape=False) -> str:  # used for the *top messages and also replies in starboard
-    return ( "[replying] "*(msg.reference is not None)
-           + (discord.utils.escape_markdown(msg.content.replace("\n","")) if escape else msg.content)
+    return ( ("[forwarding]" if msg.flags & FLAG_FORWARDED else "[replying] ")*(msg.reference is not None)
+           + (discord.utils.escape_markdown(msg.system_content.replace("\n"," ")) if escape else msg.system_content)
            + " [attachment]"*len(msg.attachments)
            + " [sticker]"*len(msg.stickers)
            + " [poll]"*(msg.poll is not None)
@@ -105,12 +107,6 @@ class Starboard(commands.Cog):
     async def db_fetchone(self, sql, parameters) -> tuple|None:  # avoids annoying double await
         return await (await self.db.execute(sql, parameters)).fetchone()
 
-    async def resolve_ref(self, ref:discord.MessageReference) -> discord.Message|None:
-        try:
-            return ref.cached_message or await self.fetch_msg(ref.channel_id,ref.message_id)
-        except (discord.NotFound, discord.Forbidden):
-            return None
-
     async def channel_allowed(self, guild_id:int, ch_id:int) -> bool:
         ch = await self.get_channel(guild_id, ch_id)
         if isinstance(ch, discord.Thread):
@@ -119,18 +115,19 @@ class Starboard(commands.Cog):
 
     # builds a message for starboard. given in this funny way so it can be unpacked into edit/send
     async def build_message(self, count:int, msg:discord.Message) -> dict:
-        embed = discord.Embed(colour=calc_color(count), description=msg.content, timestamp=msg.created_at)
+        embed = discord.Embed(colour=calc_color(count), description=msg.system_content, timestamp=msg.created_at)
         att_no = len(msg.attachments)
         if att_no>0: embed.set_image(url=msg.attachments[0].url)
         if att_no>1: embed.set_footer(text=f"{att_no-1} attachment{'s are' if att_no!=2 else ' is'} not being shown")
         embed.set_author(name=msg.author.display_name, icon_url=msg.author.display_avatar.url)
         if msg.reference is not None:
-            match await self.resolve_ref(msg.reference):
-                case None: embed.add_field(name="replying to some message",value="sorry")
+            start = "forward" if msg.flags & FLAG_FORWARDED else "reply"
+            match await msg.reference.resolved:
+                case discord.DeletedReferencedMessage: embed.add_field(name=start+"ing to some message", value="sorry")
                 case reply:
-                    embed.add_field(name=f"replying to {reply.author.display_name}", value=short_disp(reply), inline=False)
+                    embed.add_field(name=start+"ing to "+reply.author.display_name, value=short_disp(reply), inline=False)
                     if att_no==0 and len(reply.attachments)>0:
-                        embed.set_image(url=reply.attachments[0].url).set_footer(text="attachment shown is from reply")
+                        embed.set_image(url=reply.attachments[0].url).set_footer(text="attachment shown is from "+start)
         return { "content":"⭐🌟💫🤩🌌"[min(4,count//5)]+" "+msg.jump_url, "embed":embed }
 
     async def forget_message(self, msg_id:int, **r):
@@ -335,7 +332,7 @@ class Starboard(commands.Cog):
         """
         match msg, ctx.message.reference:
             case None, None: return await ctx.send("wdym")
-            case None, ref:  msg = await self.resolve_ref(ref)  # this COULD fail but realistically it won't
+            case None, ref:  msg = ref.resolve  # this COULD be deleted but realistically it won't
         count, = await self.db_fetchone("SELECT count(*) FROM stars WHERE msg=?", (msg.id,))
         await ctx.send(**await self.build_message(count, msg))
 
