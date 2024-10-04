@@ -332,7 +332,7 @@ class Starboard(commands.Cog):
         """
         match msg, ctx.message.reference:
             case None, None: return await ctx.send("wdym")
-            case None, ref:  msg = ref.resolve  # this COULD be deleted but realistically it won't
+            case None, ref:  msg = ref.resolved  # this COULD be deleted but realistically it won't
         count, = await self.db_fetchone("SELECT count(*) FROM stars WHERE msg=?", (msg.id,))
         await ctx.send(**await self.build_message(count, msg))
 
