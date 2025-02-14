@@ -61,11 +61,16 @@ def on_time(msg_id:int, timeout_d:int|None) -> bool:
     send_time = discord.utils.snowflake_time(msg_id)
     return datetime.datetime.now(datetime.UTC) < send_time + datetime.timedelta(days=timeout_d)
 
+def attachment_type(attachment:discord.Attachment) -> str:
+    match attachment.content_type:
+        case None: return  " [file]"
+        case mime: return f" [{mime.split('/',2)[0]}]"
+
 # used for the *top messages and also replies in starboard
 def short_disp(msg:discord.Message, escape=False, show_ref=True) -> str:
     return ( ("[forwarded]" if msg.flags.value & FLAG_FORWARDED else "[replying] ")*(msg.reference is not None)*show_ref
            + (discord.utils.escape_markdown(msg.system_content.replace("\n"," ")) if escape else msg.system_content)
-           + " [attachment]"*len(msg.attachments)
+           + "".join(map(attachment_type,msg.attachments))
            + " [sticker]"*len(msg.stickers)
            + " [poll]"*(msg.poll is not None)
            + " [edited]"*(msg.edited_at is not None))
@@ -135,9 +140,9 @@ class Starboard(commands.Cog):
     # builds a message for starboard. given in this funny way so it can be unpacked into edit/send
     async def build_message(self, count:int, msg:discord.Message) -> dict:
         embed = discord.Embed(colour=calc_color(count), description=msg.system_content, timestamp=msg.created_at)
-        att_no = len(msg.attachments)
-        if att_no>0: embed.set_image(url=msg.attachments[0].url)
-        if att_no>1: embed.set_footer(text=f"{att_no-1} attachment{'s are' if att_no!=2 else ' is'} not being shown")
+        atts = msg.attachments
+        if len(atts) != 0 and atts[0].content_type.startswith("image/"): embed.set_image(url=atts.pop(0).url)
+        embed.description += "".join(map(attachment_type,atts))
         embed.set_author(name=msg.author.display_name, icon_url=msg.author.display_avatar.url)
         if msg.reference is not None: await self.add_ref_to_embed(msg, embed)
         return { "content":"⭐🌟💫🤩🌌"[min(4,count//5)]+" "+msg.jump_url, "embed":embed }
