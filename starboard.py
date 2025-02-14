@@ -80,8 +80,8 @@ class Starboard(commands.Cog):
         self.bot: commands.Bot = bot
         self.db: aiosqlite.Connection = bot.db  # shortcut :3
         # yes you need to register these manually
-        self.bot.tree.add_command(app_commands.ContextMenu(name="⭐ Star",  callback=self.star_menu  ), override=True)
-        self.bot.tree.add_command(app_commands.ContextMenu(name="⭐ Unstar",callback=self.unstar_menu), override=True)
+        self.bot.tree.add_command(app_commands.ContextMenu(name="⭐ Star",   callback=self.star_menu  ), override=True)
+        self.bot.tree.add_command(app_commands.ContextMenu(name="⭐ Unstar", callback=self.unstar_menu), override=True)
 
     ### HELPERS
 
@@ -107,6 +107,13 @@ class Starboard(commands.Cog):
     async def db_fetchone(self, sql, parameters) -> tuple|None:  # avoids annoying double await
         return await (await self.db.execute(sql, parameters)).fetchone()
 
+    async def resolve_ref(self, ref:discord.MessageReference) -> discord.Message|None:
+        if ref is None or isinstance(ref.resolved, discord.DeletedReferencedMessage): return None
+        try:
+            return ref.resolved or ref.cached_message or await self.fetch_msg(ref.channel_id,ref.message_id)
+        except (discord.NotFound, discord.Forbidden):
+            return None
+
     async def channel_allowed(self, guild_id:int, ch_id:int) -> bool:
         ch = await self.get_channel(guild_id, ch_id)
         if isinstance(ch, discord.Thread):
@@ -122,8 +129,8 @@ class Starboard(commands.Cog):
         embed.set_author(name=msg.author.display_name, icon_url=msg.author.display_avatar.url)
         if msg.reference is not None:
             start = "forward" if msg.flags.value & FLAG_FORWARDED else "reply"
-            match msg.reference.resolved:
-                case discord.DeletedReferencedMessage | None:
+            match await self.resolve_ref(msg.reference):
+                case None:
                     embed.add_field(name=start+"ing to some message", value="sorry")
                 case reply:
                     embed.add_field(name=start+"ing to "+reply.author.display_name, value=short_disp(reply), inline=False)
@@ -333,7 +340,7 @@ class Starboard(commands.Cog):
         """
         match msg, ctx.message.reference:
             case None, None: return await ctx.send("wdym")
-            case None, ref:  msg = ref.resolved  # this COULD be deleted but realistically it won't
+            case None, ref:  msg = await self.resolve_ref(ref)  # this COULD be deleted but realistically it won't
         count, = await self.db_fetchone("SELECT count(*) FROM stars WHERE msg=?", (msg.id,))
         await ctx.send(**await self.build_message(count, msg))
 
@@ -467,7 +474,7 @@ class Starboard(commands.Cog):
             logging.warn(f"{count=}, {count_computed=}, {changes_after - changes_before=}")
             # add awarded
             await self.db.execute("INSERT OR IGNORE INTO awarded(msg,msg_sb,msg_ch,guild,author) VALUES(?,?,?,?,?)",
-                                  (msg_id, msg_sb.id, msg_ch_id, ctx.guild.id, msg.author.id))
+                (msg_id, msg_sb.id, msg_ch_id, ctx.guild.id, msg.author.id))
             scanned += 1
         await self.db.commit()
         await ctx.send(f"{scanned} messages added" +
