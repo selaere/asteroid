@@ -61,8 +61,9 @@ def on_time(msg_id:int, timeout_d:int|None) -> bool:
     send_time = discord.utils.snowflake_time(msg_id)
     return datetime.datetime.now(datetime.UTC) < send_time + datetime.timedelta(days=timeout_d)
 
-def short_disp(msg:discord.Message, escape=False) -> str:  # used for the *top messages and also replies in starboard
-    return ( ("[forwarding]" if msg.flags.value & FLAG_FORWARDED else "[replying] ")*(msg.reference is not None)
+# used for the *top messages and also replies in starboard
+def short_disp(msg:discord.Message, escape=False, show_ref=True) -> str:
+    return ( ("[forwarded]" if msg.flags.value & FLAG_FORWARDED else "[replying] ")*(msg.reference is not None)*show_ref
            + (discord.utils.escape_markdown(msg.system_content.replace("\n"," ")) if escape else msg.system_content)
            + " [attachment]"*len(msg.attachments)
            + " [sticker]"*len(msg.stickers)
@@ -107,6 +108,12 @@ class Starboard(commands.Cog):
     async def db_fetchone(self, sql, parameters) -> tuple|None:  # avoids annoying double await
         return await (await self.db.execute(sql, parameters)).fetchone()
 
+    async def channel_allowed(self, guild_id:int, ch_id:int) -> bool:
+        ch = await self.get_channel(guild_id, ch_id)
+        if isinstance(ch, discord.Thread):
+            ch = ch.parent
+        return re.search(r"\bcw\b", ch.name) is None
+
     async def resolve_ref(self, ref:discord.MessageReference) -> discord.Message|None:
         if ref is None or isinstance(ref.resolved, discord.DeletedReferencedMessage): return None
         try:
@@ -114,11 +121,16 @@ class Starboard(commands.Cog):
         except (discord.NotFound, discord.Forbidden):
             return None
 
-    async def channel_allowed(self, guild_id:int, ch_id:int) -> bool:
-        ch = await self.get_channel(guild_id, ch_id)
-        if isinstance(ch, discord.Thread):
-            ch = ch.parent
-        return re.search(r"\bcw\b", ch.name) is None
+    async def add_ref_to_embed(self, msg:discord.Message, embed:discord.Embed) -> None:
+        start = "forwarding " if msg.flags.value & FLAG_FORWARDED else "replying to "
+        match await self.resolve_ref(msg.reference):
+            case None:
+                embed.add_field(name=start+"some message", value="sorry", inline=0)
+            case reply:
+                embed.add_field(name=start+reply.author.display_name, value=short_disp(reply,show_ref=False), inline=0)
+                if embed.image==None and len(reply.attachments)>0:
+                    embed.set_image(url=reply.attachments[0].url)
+                if reply.reference is not None: await self.add_ref_to_embed(reply, embed)
 
     # builds a message for starboard. given in this funny way so it can be unpacked into edit/send
     async def build_message(self, count:int, msg:discord.Message) -> dict:
@@ -127,15 +139,7 @@ class Starboard(commands.Cog):
         if att_no>0: embed.set_image(url=msg.attachments[0].url)
         if att_no>1: embed.set_footer(text=f"{att_no-1} attachment{'s are' if att_no!=2 else ' is'} not being shown")
         embed.set_author(name=msg.author.display_name, icon_url=msg.author.display_avatar.url)
-        if msg.reference is not None:
-            start = "forward" if msg.flags.value & FLAG_FORWARDED else "reply"
-            match await self.resolve_ref(msg.reference):
-                case None:
-                    embed.add_field(name=start+"ing to some message", value="sorry")
-                case reply:
-                    embed.add_field(name=start+"ing to "+reply.author.display_name, value=short_disp(reply), inline=False)
-                    if att_no==0 and len(reply.attachments)>0:
-                        embed.set_image(url=reply.attachments[0].url).set_footer(text="attachment shown is from "+start)
+        if msg.reference is not None: await self.add_ref_to_embed(msg, embed)
         return { "content":"⭐🌟💫🤩🌌"[min(4,count//5)]+" "+msg.jump_url, "embed":embed }
 
     async def forget_message(self, msg_id:int, **r):
