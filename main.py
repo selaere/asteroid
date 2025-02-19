@@ -9,7 +9,7 @@ import os
 
 os.makedirs("logs", exist_ok=True)
 discord.utils.setup_logging(level=logging.DEBUG)
-discord.utils.setup_logging(level=logging.DEBUG, handler=logging.FileHandler(
+discord.utils.setup_logging(level=logging.WARN, handler=logging.FileHandler(
     f'logs/asteroid-{datetime.date.today().isoformat()}.log'))
 
 intents = discord.Intents().default()
