@@ -50,8 +50,6 @@ import re
 import logging
 from dataclasses import dataclass
 
-FLAG_FORWARDED = 16384
-
 def calc_color(count:int) -> discord.Colour:
     return discord.Colour.from_rgb(255, 255, max(0,min(255,1024//(count+3)-20)))
 
@@ -68,7 +66,7 @@ def attachment_type(attachment:discord.Attachment) -> str:
 
 # used for the *top messages and also replies in starboard
 def short_disp(msg:discord.Message, escape=False, show_ref=True) -> str:
-    return ( ("[forwarded]" if msg.flags.value & FLAG_FORWARDED else "[replying] ")*(msg.reference is not None)*show_ref
+    return ( ("[forward]" if msg.flags.forwarded else "[replying] ")*(msg.reference is not None)*show_ref
            + (discord.utils.escape_markdown(msg.system_content.replace("\n"," ")) if escape else msg.system_content)
            + "".join(map(attachment_type,msg.attachments))
            + " [sticker]"*len(msg.stickers)
@@ -92,7 +90,7 @@ class Starboard(commands.Cog):
     ### HELPERS
 
     # get the channel properly (because archived threads are not kept in cache)
-    async def get_channel(self, guild_id:int, channel_id:int) -> discord.TextChannel:
+    async def get_channel(self, guild_id:int, channel_id:int) -> discord.TextChannel.fetch_message:
         match self.bot.get_channel(channel_id):
             case None: return await self.bot.get_guild(guild).fetch_channel(channel_id)
             case x:    return x
@@ -100,10 +98,10 @@ class Starboard(commands.Cog):
     def partial_msg(self, channel:int, id:int) -> discord.PartialMessage:
         return self.bot.get_partial_messageable(channel).get_partial_message(id)
     async def fetch_msg(self, channel:int, id:int) -> discord.Message:
-        return await self.partial_msg(channel,id).fetch()
+        return await (self.bot.get_channel(channel) or self.bot.get_partial_messageable(channel)).fetch_message(id)
 
     # only intended for starred messages, to handle message disappearance. but it will do nothing to other messages
-    async def fetch_msg_opt(self, msg_ch_id:int, msg_id:int):
+    async def fetch_msg_opt(self, msg_ch_id:int, msg_id:int) -> discord.Message|None:
         try:
             return await self.fetch_msg(msg_ch_id,msg_id)
         except (discord.NotFound, discord.Forbidden):
@@ -119,23 +117,38 @@ class Starboard(commands.Cog):
             ch = ch.parent
         return re.search(r"\bcw\b", ch.name) is None
 
-    async def resolve_ref(self, ref:discord.MessageReference) -> discord.Message|None:
+    # resolves a reply or forward.
+    async def resolve_ref(self, msg:discord.Message) -> discord.Message|discord.MessageSnapshot|None:
+        ref = msg.reference
         if ref is None or isinstance(ref.resolved, discord.DeletedReferencedMessage): return None
+        # for forwards, only fetch if the guild is the same. we wouldnt want to leak the origin of a message
+        if msg.message_snapshots and ref.guild_id != msg.guild.id: return msg.message_snapshots[0]
         try:
             return ref.resolved or ref.cached_message or await self.fetch_msg(ref.channel_id,ref.message_id)
         except (discord.NotFound, discord.Forbidden):
             return None
 
     async def add_ref_to_embed(self, msg:discord.Message, embed:discord.Embed) -> None:
-        start = "forwarding " if msg.flags.value & FLAG_FORWARDED else "replying to "
-        match await self.resolve_ref(msg.reference):
+        match await self.resolve_ref(msg):
             case None:
-                embed.add_field(name=start+"some message", value="sorry", inline=0)
-            case reply:
-                embed.add_field(name=start+reply.author.display_name, value=short_disp(reply,show_ref=False), inline=0)
+                embed.add_field(name="replying to some message", value="sorry", inline=False)
+            case discord.Message() as reply:
+                if msg.flags.forwarded:
+                    name = "forwarding from #" + reply.channel.name
+                else:
+                    name = "replying to " + reply.author.display_name
+                embed.add_field(name=name, value=short_disp(reply,show_ref=False), inline=False)
                 if embed.image==None and len(reply.attachments)>0:
                     embed.set_image(url=reply.attachments[0].url)
                 if reply.reference is not None: await self.add_ref_to_embed(reply, embed)
+            case discord.MessageSnapshot() as forward:
+                disp = (forward.content
+                    + "".join(map(attachment_type,forward.attachments))
+                    + " [sticker]"*len(forward.stickers)
+                    + " [edited]"*(forward.edited_at is not None))
+                embed.add_field(name="forwarding from somewhere", value=disp, inline=False)
+                if embed.image==None and len(reply.attachments)>0:
+                    embed.set_image(url=reply.attachments[0].url)
 
     # builds a message for starboard. given in this funny way so it can be unpacked into edit/send
     async def build_message(self, count:int, msg:discord.Message) -> dict:
@@ -347,9 +360,9 @@ class Starboard(commands.Cog):
 
         :param msg: the message to show. may be given as a reply, or as an ID if in the same channel, or as a jump link.
         """
-        match msg, ctx.message.reference:
-            case None, None: return await ctx.send("wdym")
-            case None, ref:  msg = await self.resolve_ref(ref)  # this COULD be deleted but realistically it won't
+        if not msg:
+            msg = await self.resolve_ref(ctx.message)
+            if not msg: return await ctx.send("wdym")
         count, = await self.db_fetchone("SELECT count(*) FROM stars WHERE msg=?", (msg.id,))
         await ctx.send(**await self.build_message(count, msg))
 
