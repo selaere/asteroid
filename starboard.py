@@ -90,7 +90,7 @@ class Starboard(commands.Cog):
     ### HELPERS
 
     # get the channel properly (because archived threads are not kept in cache)
-    async def get_channel(self, guild_id:int, channel_id:int) -> discord.TextChannel.fetch_message:
+    async def get_channel(self, guild_id:int, channel_id:int) -> discord.TextChannel:
         match self.bot.get_channel(channel_id):
             case None: return await self.bot.get_guild(guild).fetch_channel(channel_id)
             case x:    return x
@@ -120,35 +120,34 @@ class Starboard(commands.Cog):
     # resolves a reply or forward.
     async def resolve_ref(self, msg:discord.Message) -> discord.Message|discord.MessageSnapshot|None:
         ref = msg.reference
-        if ref is None or isinstance(ref.resolved, discord.DeletedReferencedMessage): return None
-        # for forwards, only fetch if the guild is the same. we wouldnt want to leak the origin of a message
-        if msg.message_snapshots and ref.guild_id != msg.guild.id: return msg.message_snapshots[0]
-        try:
-            return ref.resolved or ref.cached_message or await self.fetch_msg(ref.channel_id,ref.message_id)
-        except (discord.NotFound, discord.Forbidden):
-            return None
+        return ref and not isinstance(ref.resolved, discord.DeletedReferencedMessage) and (
+               ref.resolved  # sometimes in replies
+            or ref.cached_message  # i dont trust the cache but
+            or ref.guild_id == msg.guild.id and await self.fetch_msg_opt(ref.channel_id,ref.message_id)
+            # ^ only fetch messages from forwards if the guild is the same. we wouldnt want to leak that stuff
+            or msg.message_snapshots and msg.message_snapshots[0])  # in forwards
 
+    # used in `build_message`: chase down a reply/forward chain, adding images from them if possible
     async def add_ref_to_embed(self, msg:discord.Message, embed:discord.Embed) -> None:
         match await self.resolve_ref(msg):
             case None:
                 embed.add_field(name="replying to some message", value="sorry", inline=False)
+            # reply/forward in the same server. fully fetched with all of its info
             case discord.Message() as reply:
-                if msg.flags.forwarded:
-                    name = "forwarding from #" + reply.channel.name
-                else:
-                    name = "replying to " + reply.author.display_name
+                name = f"forwarding from #{reply.channel.name}" if msg.flags.forwarded else \
+                       f"replying to {reply.author.display_name}"
                 embed.add_field(name=name, value=short_disp(reply,show_ref=False), inline=False)
-                if embed.image==None and len(reply.attachments)>0:
-                    embed.set_image(url=reply.attachments[0].url)
+                if embed.image==None and len(reply.attachments)>0: embed.set_image(url=reply.attachments[0].url)
                 if reply.reference is not None: await self.add_ref_to_embed(reply, embed)
+            # forward as a message snapshot: from the same server (if deleted) or from somewhere else (if chan is None)
             case discord.MessageSnapshot() as forward:
-                disp = (forward.content
+                chan = msg.guild.get_channel_or_thread(msg.reference.channel_id)
+                name = f"forwarding from {'#' + chan.name if chan else 'somewhere'}"
+                embed.add_field(name=name, value=(forward.content
                     + "".join(map(attachment_type,forward.attachments))
                     + " [sticker]"*len(forward.stickers)
-                    + " [edited]"*(forward.edited_at is not None))
-                embed.add_field(name="forwarding from somewhere", value=disp, inline=False)
-                if embed.image==None and len(reply.attachments)>0:
-                    embed.set_image(url=reply.attachments[0].url)
+                    + " [edited]"*(forward.edited_at is not None)), inline=False)
+                if embed.image==None and len(reply.attachments)>0: embed.set_image(url=reply.attachments[0].url)
 
     # builds a message for starboard. given in this funny way so it can be unpacked into edit/send
     async def build_message(self, count:int, msg:discord.Message) -> dict:
