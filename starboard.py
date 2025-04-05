@@ -76,6 +76,9 @@ def short_disp(msg:discord.Message, escape=False, show_ref=True) -> str:
 def msg_fields(msg: discord.Message) -> dict:
     return { "msg_id":msg.id, "msg_ch_id":msg.channel.id, "author_id":msg.author.id, "msg":msg }
 
+def can_show_first(atts:list[discord.Attachment]) -> bool:
+    return len(atts) > 0 and atts[0].content_type.startswith("image/") and not atts[0].is_spoiler()
+
 class NotConfigured(Exception): pass
 
 class Starboard(commands.Cog):
@@ -137,7 +140,8 @@ class Starboard(commands.Cog):
                 name = f"forwarding from #{reply.channel.name}" if msg.flags.forwarded else \
                        f"replying to {reply.author.display_name}"
                 embed.add_field(name=name, value=short_disp(reply,show_ref=False), inline=False)
-                if embed.image==None and len(reply.attachments)>0: embed.set_image(url=reply.attachments[0].url)
+                if embed.image.url is None and can_show_first(reply.attachments):
+                    embed.set_image(url=reply.attachments[0].url)
                 if reply.reference is not None: await self.add_ref_to_embed(reply, embed)
             # forward as a message snapshot: from the same server (if deleted) or from somewhere else (if chan is None)
             case discord.MessageSnapshot() as forward:
@@ -147,13 +151,14 @@ class Starboard(commands.Cog):
                     + "".join(map(attachment_type,forward.attachments))
                     + " [sticker]"*len(forward.stickers)
                     + " [edited]"*(forward.edited_at is not None)), inline=False)
-                if embed.image==None and len(reply.attachments)>0: embed.set_image(url=reply.attachments[0].url)
+                if embed.image.url is None and can_show_first(reply.attachments):
+                    embed.set_image(url=reply.attachments[0].url)
 
     # builds a message for starboard. given in this funny way so it can be unpacked into edit/send
     async def build_message(self, count:int, msg:discord.Message) -> dict:
         embed = discord.Embed(colour=calc_color(count), description=msg.system_content, timestamp=msg.created_at)
-        atts = msg.attachments
-        if len(atts) != 0 and atts[0].content_type.startswith("image/"): embed.set_image(url=atts.pop(0).url)
+        atts = msg.attachments.copy()
+        if can_show_first(atts): embed.set_image(url=atts.pop(0).url)
         embed.description += "".join(map(attachment_type,atts))
         embed.set_author(name=msg.author.display_name, icon_url=msg.author.display_avatar.url)
         if msg.reference is not None: await self.add_ref_to_embed(msg, embed)
